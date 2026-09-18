@@ -4,3 +4,7 @@ code_analysis/
 map_generator/RoslynAnalyzer/bin/
 map_generator/RoslynAnalyzer/obj/
 scratch/
+AITracer.MsBuildTask/bin/
+AITracer.MsBuildTask/obj/
+AITracer.Runtime/bin/
+AITracer.Runtime/obj/

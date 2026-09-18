@@ -1,0 +1,30 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  
+  <!-- Find the assembly path relative to this targets file -->
+  <PropertyGroup>
+    <AITracerTaskAssembly>$(MSBuildThisFileDirectory)..\lib\netstandard2.0\AITracer.MsBuildTask.dll</AITracerTaskAssembly>
+  </PropertyGroup>
+
+  <!-- If developing locally, you can fallback to the bin path -->
+  <PropertyGroup Condition="!Exists('$(AITracerTaskAssembly)')">
+    <AITracerTaskAssembly>$(MSBuildThisFileDirectory)bin\Debug\netstandard2.0\win-x64\AITracer.MsBuildTask.dll</AITracerTaskAssembly>
+  </PropertyGroup>
+
+  <UsingTask TaskName="AITracer.MsBuildTask.InjectTracesTask" AssemblyFile="$(AITracerTaskAssembly)" />
+
+  <Target Name="AITracerInject" BeforeTargets="CoreCompile">
+    <InjectTracesTask 
+        Compile="@(Compile)" 
+        DatabasePath="$(AITracerDbPath)" 
+        IntermediateOutputPath="$(IntermediateOutputPath)">
+      <Output TaskParameter="ModifiedCompile" ItemName="AITracerModifiedCompile" />
+    </InjectTracesTask>
+
+    <!-- Replace the original Compile items with the modified ones -->
+    <ItemGroup Condition="'@(AITracerModifiedCompile)' != ''">
+      <Compile Remove="@(Compile)" />
+      <Compile Include="@(AITracerModifiedCompile)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

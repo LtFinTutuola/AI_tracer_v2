@@ -40,6 +40,11 @@ namespace RoslynAnalyzer
             var solution = await workspace.OpenSolutionAsync(solutionPath);
 
             var logger = new MarkdownLogger(outputDir);
+            
+            string dbPath = Path.Combine(outputDir, "basic_blocks.sqlite");
+            var sqliteRepo = new SqliteRepository(dbPath);
+            sqliteRepo.InitializeDatabase(clearAll: true);
+
             var extractor = new BlockExtractor();
 
             int projectCount = 0;
@@ -64,6 +69,19 @@ namespace RoslynAnalyzer
                             if (blocks.Any())
                             {
                                 logger.LogBlocks(project.Name, document.Name, blocks);
+                                
+                                var records = blocks.Select(b => new BasicBlockRecord {
+                                    ProjectName = project.Name,
+                                    FilePath = document.FilePath,
+                                    MethodSignature = b.MethodSignature,
+                                    ScopeStartLine = b.ScopeStartLine,
+                                    ScopeEndLine = b.ScopeEndLine,
+                                    InjectionLine = b.StartLine,
+                                    Reason = b.Reason,
+                                    ToTrace = true
+                                }).ToList();
+                                
+                                sqliteRepo.SaveBlocksBatch(records);
                             }
                         }
                     }
@@ -72,6 +90,7 @@ namespace RoslynAnalyzer
 
             logger.Save();
             Console.WriteLine($"Processed {projectCount} projects. Log saved to {logger.FilePath}");
+            Console.WriteLine($"SQLite database saved to {dbPath}");
         }
 
         static bool ShouldProcess(Document document)

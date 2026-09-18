@@ -1,0 +1,11 @@
+<Project>
+  <Import Project="C:\repo\AI_tracer_v2\AITracer.MsBuildTask\AITracer.targets" />
+  <PropertyGroup>
+    <AITracerDbPath>C:\repo\AI_tracer_v2\code_analysis\basic_blocks.sqlite</AITracerDbPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="AITracer.Runtime">
+      <HintPath>C:\repo\AI_tracer_v2\AITracer.Runtime\bin\Debug\netstandard2.0\AITracer.Runtime.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

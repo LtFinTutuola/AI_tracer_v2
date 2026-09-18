@@ -11,8 +11,11 @@ namespace RoslynAnalyzer
     public class TraceableBlock
     {
         public string MethodName { get; set; }
+        public string MethodSignature { get; set; }
         public string BlockText { get; set; }
         public int StartLine { get; set; }
+        public int ScopeStartLine { get; set; }
+        public int ScopeEndLine { get; set; }
         public string Reason { get; set; }
     }
 
@@ -32,6 +35,20 @@ namespace RoslynAnalyzer
                 if (cfg == null) continue;
 
                 var methodName = method.Identifier().Text;
+                
+                string methodSignature;
+                if (method is MethodDeclarationSyntax mds) {
+                    methodSignature = mds.WithBody(null).WithExpressionBody(null).ToString().TrimEnd(';', '\r', '\n', ' ');
+                } else if (method is ConstructorDeclarationSyntax cds) {
+                    methodSignature = cds.WithBody(null).WithExpressionBody(null).ToString().TrimEnd(';', '\r', '\n', ' ');
+                } else {
+                    methodSignature = methodName;
+                }
+                
+                var methodSpan = syntaxRoot.SyntaxTree.GetLineSpan(method.Span);
+                int scopeStartLine = methodSpan.StartLinePosition.Line + 1;
+                int scopeEndLine = methodSpan.EndLinePosition.Line + 1;
+
                 bool methodHasBranches = cfg.Blocks.Any(b => b.ConditionalSuccessor != null);
 
                 var branchTargets = new HashSet<BasicBlock>();
@@ -174,8 +191,11 @@ namespace RoslynAnalyzer
                     results.Add(new TraceableBlock
                     {
                         MethodName = methodName,
+                        MethodSignature = methodSignature,
                         BlockText = blockText,
                         StartLine = startLine,
+                        ScopeStartLine = scopeStartLine,
+                        ScopeEndLine = scopeEndLine,
                         Reason = reason
                     });
 
@@ -215,8 +235,11 @@ namespace RoslynAnalyzer
                             results.Add(new TraceableBlock
                             {
                                 MethodName = methodName,
+                                MethodSignature = methodSignature,
                                 BlockText = jump.ToFullString().Trim(),
                                 StartLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).StartLinePosition.Line + 1,
+                                ScopeStartLine = scopeStartLine,
+                                ScopeEndLine = scopeEndLine,
                                 Reason = "Early Exit (Guard Clause/Jump - CFG Fallback)"
                             });
                         }
