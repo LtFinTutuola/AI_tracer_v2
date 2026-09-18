@@ -1,0 +1,6 @@
+config.yaml
+artifacts/
+code_analysis/
+map_generator/RoslynAnalyzer/bin/
+map_generator/RoslynAnalyzer/obj/
+scratch/
