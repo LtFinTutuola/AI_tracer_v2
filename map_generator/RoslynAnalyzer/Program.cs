@@ -77,6 +77,7 @@ namespace RoslynAnalyzer
                                     ScopeStartLine = b.ScopeStartLine,
                                     ScopeEndLine = b.ScopeEndLine,
                                     InjectionLine = b.StartLine,
+                                    InjectionOffset = b.InjectionOffset,
                                     Reason = b.Reason,
                                     ToTrace = true
                                 }).ToList();

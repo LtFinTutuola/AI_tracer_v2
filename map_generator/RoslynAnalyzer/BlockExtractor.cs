@@ -16,6 +16,7 @@ namespace RoslynAnalyzer
         public int StartLine { get; set; }
         public int ScopeStartLine { get; set; }
         public int ScopeEndLine { get; set; }
+        public int InjectionOffset { get; set; }
         public string Reason { get; set; }
     }
 
@@ -163,6 +164,7 @@ namespace RoslynAnalyzer
 
                     string blockText = "";
                     int startLine = 0;
+                    int injectionOffset = 0;
 
                     if (catchNode != null)
                     {
@@ -170,6 +172,7 @@ namespace RoslynAnalyzer
                         var rewritten = rewriter.Visit(catchNode);
                         blockText = rewritten.ToFullString();
                         startLine = syntaxRoot.SyntaxTree.GetLineSpan(catchNode.Span).StartLinePosition.Line + 1;
+                        injectionOffset = catchNode.Block.SpanStart + 1;
                     }
                     else
                     {
@@ -180,6 +183,7 @@ namespace RoslynAnalyzer
                             if (startLine == 0)
                             {
                                 startLine = syntaxRoot.SyntaxTree.GetLineSpan(stmt.Span).StartLinePosition.Line + 1;
+                                injectionOffset = stmt.SpanStart;
                             }
                         }
                         blockText = sb.ToString();
@@ -196,6 +200,7 @@ namespace RoslynAnalyzer
                         StartLine = startLine,
                         ScopeStartLine = scopeStartLine,
                         ScopeEndLine = scopeEndLine,
+                        InjectionOffset = injectionOffset,
                         Reason = reason
                     });
 
@@ -240,6 +245,7 @@ namespace RoslynAnalyzer
                                 StartLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).StartLinePosition.Line + 1,
                                 ScopeStartLine = scopeStartLine,
                                 ScopeEndLine = scopeEndLine,
+                                InjectionOffset = jump.SpanStart,
                                 Reason = "Early Exit (Guard Clause/Jump - CFG Fallback)"
                             });
                         }

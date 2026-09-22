@@ -11,6 +11,7 @@ namespace RoslynAnalyzer
         public int ScopeStartLine { get; set; }
         public int ScopeEndLine { get; set; }
         public int InjectionLine { get; set; }
+        public int InjectionOffset { get; set; }
         public string Reason { get; set; }
         public bool ToTrace { get; set; } = true;
     }

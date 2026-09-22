@@ -36,6 +36,7 @@ namespace RoslynAnalyzer
                     scope_start_line INTEGER NOT NULL,
                     scope_end_line INTEGER NOT NULL,
                     injection_line INTEGER NOT NULL,
+                    injection_offset INTEGER NOT NULL DEFAULT 0,
                     reason TEXT NOT NULL,
                     to_trace INTEGER NOT NULL DEFAULT 1
                 );
@@ -53,9 +54,9 @@ namespace RoslynAnalyzer
             var command = connection.CreateCommand();
             command.CommandText = @"
                 INSERT INTO basic_blocks 
-                (project_name, file_path, method_signature, scope_start_line, scope_end_line, injection_line, reason, to_trace) 
+                (project_name, file_path, method_signature, scope_start_line, scope_end_line, injection_line, injection_offset, reason, to_trace) 
                 VALUES 
-                (@project_name, @file_path, @method_signature, @scope_start_line, @scope_end_line, @injection_line, @reason, @to_trace)
+                (@project_name, @file_path, @method_signature, @scope_start_line, @scope_end_line, @injection_line, @injection_offset, @reason, @to_trace)
             ";
 
             var projectParam = command.Parameters.Add("@project_name", SqliteType.Text);
@@ -64,6 +65,7 @@ namespace RoslynAnalyzer
             var startParam = command.Parameters.Add("@scope_start_line", SqliteType.Integer);
             var endParam = command.Parameters.Add("@scope_end_line", SqliteType.Integer);
             var injParam = command.Parameters.Add("@injection_line", SqliteType.Integer);
+            var offsetParam = command.Parameters.Add("@injection_offset", SqliteType.Integer);
             var reasonParam = command.Parameters.Add("@reason", SqliteType.Text);
             var toTraceParam = command.Parameters.Add("@to_trace", SqliteType.Integer);
 
@@ -75,6 +77,7 @@ namespace RoslynAnalyzer
                 startParam.Value = record.ScopeStartLine;
                 endParam.Value = record.ScopeEndLine;
                 injParam.Value = record.InjectionLine;
+                offsetParam.Value = record.InjectionOffset;
                 reasonParam.Value = record.Reason ?? string.Empty;
                 toTraceParam.Value = record.ToTrace ? 1 : 0;
 
