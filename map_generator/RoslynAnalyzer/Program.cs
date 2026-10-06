@@ -76,6 +76,8 @@ namespace RoslynAnalyzer
                                     MethodSignature = b.MethodSignature,
                                     ScopeStartLine = b.ScopeStartLine,
                                     ScopeEndLine = b.ScopeEndLine,
+                                    BlockStartLine = b.BlockStartLine,
+                                    BlockEndLine = b.BlockEndLine,
                                     InjectionLine = b.StartLine,
                                     InjectionOffset = b.InjectionOffset,
                                     Reason = b.Reason,

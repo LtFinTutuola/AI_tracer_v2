@@ -16,6 +16,8 @@ namespace RoslynAnalyzer
         public int StartLine { get; set; }
         public int ScopeStartLine { get; set; }
         public int ScopeEndLine { get; set; }
+        public int BlockStartLine { get; set; }
+        public int BlockEndLine { get; set; }
         public int InjectionOffset { get; set; }
         public string Reason { get; set; }
     }
@@ -32,7 +34,17 @@ namespace RoslynAnalyzer
             {
                 if (method.Body == null && method.ExpressionBody == null) continue;
 
-                var cfg = ControlFlowGraph.Create(method, semanticModel);
+                ControlFlowGraph cfg = null;
+                try
+                {
+                    cfg = ControlFlowGraph.Create(method, semanticModel);
+                }
+                catch (Exception ex)
+                {
+                    // Ignore Roslyn bugs or malformed code that crashes CFG generation
+                    continue;
+                }
+
                 if (cfg == null) continue;
 
                 var methodName = method.Identifier().Text;
@@ -165,6 +177,32 @@ namespace RoslynAnalyzer
                     string blockText = "";
                     int startLine = 0;
                     int injectionOffset = 0;
+                    int blockStartLine = 0;
+                    int blockEndLine = 0;
+                    
+                    var logicalParent = statements.SelectMany(s => s.AncestorsAndSelf())
+                        .FirstOrDefault(n => n is BlockSyntax || n is SwitchSectionSyntax);
+                        
+                    if (logicalParent != null)
+                    {
+                        blockStartLine = syntaxRoot.SyntaxTree.GetLineSpan(logicalParent.Span).StartLinePosition.Line + 1;
+                        blockEndLine = syntaxRoot.SyntaxTree.GetLineSpan(logicalParent.Span).EndLinePosition.Line + 1;
+                    }
+                    else if (catchNode != null && catchNode.Block != null)
+                    {
+                        blockStartLine = syntaxRoot.SyntaxTree.GetLineSpan(catchNode.Block.Span).StartLinePosition.Line + 1;
+                        blockEndLine = syntaxRoot.SyntaxTree.GetLineSpan(catchNode.Block.Span).EndLinePosition.Line + 1;
+                    }
+                    else
+                    {
+                        var firstStmt = statements.FirstOrDefault();
+                        if (firstStmt != null)
+                        {
+                            blockStartLine = syntaxRoot.SyntaxTree.GetLineSpan(firstStmt.Span).StartLinePosition.Line + 1;
+                            var lastStmt = statements.LastOrDefault();
+                            blockEndLine = syntaxRoot.SyntaxTree.GetLineSpan(lastStmt.Span).EndLinePosition.Line + 1;
+                        }
+                    }
 
                     if (catchNode != null)
                     {
@@ -200,6 +238,8 @@ namespace RoslynAnalyzer
                         StartLine = startLine,
                         ScopeStartLine = scopeStartLine,
                         ScopeEndLine = scopeEndLine,
+                        BlockStartLine = blockStartLine,
+                        BlockEndLine = blockEndLine,
                         InjectionOffset = injectionOffset,
                         Reason = reason
                     });
@@ -245,6 +285,8 @@ namespace RoslynAnalyzer
                                 StartLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).StartLinePosition.Line + 1,
                                 ScopeStartLine = scopeStartLine,
                                 ScopeEndLine = scopeEndLine,
+                                BlockStartLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).StartLinePosition.Line + 1,
+                                BlockEndLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).EndLinePosition.Line + 1,
                                 InjectionOffset = jump.SpanStart,
                                 Reason = "Early Exit (Guard Clause/Jump - CFG Fallback)"
                             });

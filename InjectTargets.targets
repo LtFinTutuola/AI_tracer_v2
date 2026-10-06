@@ -6,6 +6,10 @@
   <ItemGroup>
     <Reference Include="AITracer.Runtime">
       <HintPath>C:\repo\AI_tracer_v2\AITracer.Runtime\bin\Debug\netstandard2.0\AITracer.Runtime.dll</HintPath>
+      <Private>True</Private>
     </Reference>
   </ItemGroup>
+  <Target Name="CopyAITracerRuntime" AfterTargets="Build">
+    <Copy SourceFiles="C:\repo\AI_tracer_v2\AITracer.Runtime\bin\Debug\netstandard2.0\AITracer.Runtime.dll" DestinationFolder="$(TargetDir)" />
+  </Target>
 </Project>

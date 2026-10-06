@@ -61,6 +61,12 @@ namespace AITracer.Runtime
         {
             while (true)
             {
+                if (_queue.IsEmpty)
+                {
+                    Thread.Sleep(100);
+                    continue;
+                }
+
                 int count = 0;
                 
                 try

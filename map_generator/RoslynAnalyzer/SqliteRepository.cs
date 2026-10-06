@@ -35,6 +35,8 @@ namespace RoslynAnalyzer
                     method_signature TEXT NOT NULL,
                     scope_start_line INTEGER NOT NULL,
                     scope_end_line INTEGER NOT NULL,
+                    block_start_line INTEGER NOT NULL,
+                    block_end_line INTEGER NOT NULL,
                     injection_line INTEGER NOT NULL,
                     injection_offset INTEGER NOT NULL DEFAULT 0,
                     reason TEXT NOT NULL,
@@ -54,9 +56,9 @@ namespace RoslynAnalyzer
             var command = connection.CreateCommand();
             command.CommandText = @"
                 INSERT INTO basic_blocks 
-                (project_name, file_path, method_signature, scope_start_line, scope_end_line, injection_line, injection_offset, reason, to_trace) 
+                (project_name, file_path, method_signature, scope_start_line, scope_end_line, block_start_line, block_end_line, injection_line, injection_offset, reason, to_trace) 
                 VALUES 
-                (@project_name, @file_path, @method_signature, @scope_start_line, @scope_end_line, @injection_line, @injection_offset, @reason, @to_trace)
+                (@project_name, @file_path, @method_signature, @scope_start_line, @scope_end_line, @block_start_line, @block_end_line, @injection_line, @injection_offset, @reason, @to_trace)
             ";
 
             var projectParam = command.Parameters.Add("@project_name", SqliteType.Text);
@@ -64,6 +66,8 @@ namespace RoslynAnalyzer
             var sigParam = command.Parameters.Add("@method_signature", SqliteType.Text);
             var startParam = command.Parameters.Add("@scope_start_line", SqliteType.Integer);
             var endParam = command.Parameters.Add("@scope_end_line", SqliteType.Integer);
+            var blockStartParam = command.Parameters.Add("@block_start_line", SqliteType.Integer);
+            var blockEndParam = command.Parameters.Add("@block_end_line", SqliteType.Integer);
             var injParam = command.Parameters.Add("@injection_line", SqliteType.Integer);
             var offsetParam = command.Parameters.Add("@injection_offset", SqliteType.Integer);
             var reasonParam = command.Parameters.Add("@reason", SqliteType.Text);
@@ -76,6 +80,8 @@ namespace RoslynAnalyzer
                 sigParam.Value = record.MethodSignature ?? string.Empty;
                 startParam.Value = record.ScopeStartLine;
                 endParam.Value = record.ScopeEndLine;
+                blockStartParam.Value = record.BlockStartLine;
+                blockEndParam.Value = record.BlockEndLine;
                 injParam.Value = record.InjectionLine;
                 offsetParam.Value = record.InjectionOffset;
                 reasonParam.Value = record.Reason ?? string.Empty;
