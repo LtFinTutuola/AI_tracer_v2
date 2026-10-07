@@ -1,7 +1,9 @@
 <Project>
   <Import Project="C:\repo\AI_tracer_v2\AITracer.MsBuildTask\AITracer.targets" />
   <PropertyGroup>
-    <AITracerDbPath>C:\repo\AI_tracer_v2\code_analysis\basic_blocks.sqlite</AITracerDbPath>
+    <YamlContent>$([System.IO.File]::ReadAllText('C:\repo\AI_tracer_v2\map_generator\config.yaml'))</YamlContent>
+    <WorkingFolder>$([System.Text.RegularExpressions.Regex]::Match($(YamlContent), `working_folder:\s*&quot;?([^&quot;\r\n]+)&quot;?`).Groups[1].Value)</WorkingFolder>
+    <AITracerDbPath>C:\repo\AI_tracer_v2\code_analysis\$(WorkingFolder)\basic_blocks.sqlite</AITracerDbPath>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="AITracer.Runtime">

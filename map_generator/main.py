@@ -14,23 +14,28 @@ def main():
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
         
-    test_solution_path = config.get('test_solution_path')
-    test_target_framework = config.get('test_target_framework')
+    target_solution = config.get('target_solution')
+    target_framework = config.get('target_framework')
+    working_folder = config.get('working_folder')
     
-    if not test_solution_path:
-        print("Error: 'test_solution_path' not defined in config.yaml")
+    if not target_solution:
+        print("Error: 'target_solution' not defined in config.yaml")
+        sys.exit(1)
+        
+    if not working_folder:
+        print("Error: 'working_folder' not defined in config.yaml")
         sys.exit(1)
         
     # Prepare output directory
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    out_dir = os.path.join(repo_root, 'code_analysis')
+    out_dir = os.path.join(repo_root, 'code_analysis', working_folder)
     os.makedirs(out_dir, exist_ok=True)
     
     # Path to the C# Analyzer project
     analyzer_proj = os.path.join(os.path.dirname(__file__), 'RoslynAnalyzer', 'RoslynAnalyzer.csproj')
     
-    print(f"Starting Roslyn Analysis on: {test_solution_path}")
-    print(f"Target Framework: {test_target_framework}")
+    print(f"Starting Roslyn Analysis on: {target_solution}")
+    print(f"Target Framework: {target_framework}")
     print(f"Output Directory: {out_dir}")
     
     # Run the C# project
@@ -38,8 +43,8 @@ def main():
         "dotnet", "run",
         "--project", analyzer_proj,
         "--",
-        test_solution_path,
-        str(test_target_framework),
+        target_solution,
+        str(target_framework),
         out_dir
     ]
     

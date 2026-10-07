@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Threading;
+using System.Runtime.InteropServices;
 
 namespace AITracer.Runtime
 {
@@ -10,9 +11,39 @@ namespace AITracer.Runtime
         private static readonly AsyncLocal<string> _traceId = new AsyncLocal<string>();
         private static readonly ConcurrentQueue<string> _queue = new ConcurrentQueue<string>();
         
-        private static string _logFilePath = @"C:\repo\AI_tracer_v2\code_analysis\aitracer_runtime.log";
+        private static string _logFilePath;
         private static bool _isRunning = false;
         private static readonly object _lock = new object();
+
+        static TraceContext()
+        {
+            string logDir;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                logDir = Path.Combine(baseDir, "AITraces");
+            }
+            else
+            {
+                // Percorso per ambiente Android
+                logDir = Path.Combine("/storage", "emulated", "0", "TCPOS.net", "TCPOS.DroidPos", "AITraces");
+            }
+            
+            try
+            {
+                if (!Directory.Exists(logDir))
+                {
+                    Directory.CreateDirectory(logDir);
+                }
+            }
+            catch
+            {
+                // Ignorare errori di creazione per non far crashare il costruttore statico
+            }
+            
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            _logFilePath = Path.Combine(logDir, $"aitracer_{timestamp}.log");
+        }
 
         public static void Configure(string logFilePath)
         {

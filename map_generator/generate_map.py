@@ -1,9 +1,32 @@
 import sqlite3
 import os
+import yaml
+import glob
+import sys
 
-DB_PATH = r"c:\repo\AI_tracer_v2\code_analysis\basic_blocks_frontend_8.2.sqlite"
-LOG_PATH = r"c:\repo\AI_tracer_v2\code_analysis\aitracer_runtime_8.2.log"
-OUTPUT_PATH = r"c:\repo\AI_tracer_v2\code_analysis\execution_map_8.2.md"
+def get_latest_log_file(working_dir):
+    search_pattern = os.path.join(working_dir, '*.log')
+    log_files = glob.glob(search_pattern)
+    if not log_files:
+        return None
+    return max(log_files, key=os.path.getmtime)
+
+config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+with open(config_path, 'r', encoding='utf-8') as f:
+    config = yaml.safe_load(f)
+
+working_folder = config.get('working_folder', 'default')
+target_solution = config.get('target_solution')
+
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+out_dir = os.path.join(repo_root, 'code_analysis', working_folder)
+
+# Find sqlite database in working folder
+sqlite_files = glob.glob(os.path.join(out_dir, '*.sqlite'))
+DB_PATH = sqlite_files[0] if sqlite_files else os.path.join(out_dir, 'basic_blocks.sqlite')
+
+LOG_PATH = get_latest_log_file(out_dir)
+OUTPUT_PATH = os.path.join(out_dir, "execution_map.md")
 
 def load_basic_blocks(db_path):
     conn = sqlite3.connect(db_path)
@@ -101,6 +124,10 @@ def format_scope_output(file_path, method_signature, executed_block_ids, blocks,
     return "\n".join(output_lines) + "\n"
 
 def generate_map():
+    if LOG_PATH is None:
+        print(f"Error: No log file found in the working folder: {out_dir}")
+        return
+        
     blocks = load_basic_blocks(DB_PATH)
     file_cache = {}
     
