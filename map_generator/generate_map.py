@@ -123,6 +123,79 @@ def format_scope_output(file_path, method_signature, executed_block_ids, blocks,
 
     return "\n".join(output_lines) + "\n"
 
+class ScopeNode:
+    def __init__(self, file_path, method_signature, timestamp, correlation_id, thread_id):
+        self.file_path = file_path
+        self.method_signature = method_signature
+        self.timestamp = timestamp
+        self.correlation_id = correlation_id
+        self.thread_id = thread_id
+        self.executed_block_ids = []
+
+    def __eq__(self, other):
+        if not isinstance(other, ScopeNode):
+            return False
+        return (self.file_path == other.file_path and 
+                self.method_signature == other.method_signature and 
+                self.executed_block_ids == other.executed_block_ids)
+
+class LoopNode:
+    def __init__(self, sequence, iterations):
+        self.sequence = sequence
+        self.iterations = iterations
+
+def compress_stream(nodes):
+    MAX_PATTERN_LENGTH = 10
+    compressed = []
+    i = 0
+    n = len(nodes)
+    while i < n:
+        match_found = False
+        max_len = min(MAX_PATTERN_LENGTH, (n - i) // 2)
+        for L in range(max_len, 0, -1):
+            pattern = nodes[i:i+L]
+            next_pattern = nodes[i+L:i+2*L]
+            if pattern == next_pattern:
+                iterations = 2
+                k = i + 2*L
+                while k + L <= n and nodes[k:k+L] == pattern:
+                    iterations += 1
+                    k += L
+                compressed.append(LoopNode(pattern, iterations))
+                i = k
+                match_found = True
+                break
+        
+        if not match_found:
+            compressed.append(nodes[i])
+            i += 1
+            
+    return compressed
+
+def render_scope(scope, blocks, file_cache, db_path, out, indent=""):
+    out.write(f"{indent}---\n\n")
+    out.write(f"{indent}### ⏱️ [{scope.timestamp}] CONTEXT SWITCH\n")
+    out.write(f"{indent}- **File:** `{scope.file_path}`\n")
+    out.write(f"{indent}- **Method:** `{scope.method_signature}`\n")
+    out.write(f"{indent}- **Thread ID:** {scope.thread_id} | **Correlation ID:** `{scope.correlation_id}`\n")
+    out.write(f"{indent}- **Executed Blocks:** {', '.join(scope.executed_block_ids)}\n\n")
+    
+    formatted_scope = format_scope_output(scope.file_path, scope.method_signature, scope.executed_block_ids, blocks, file_cache, db_path)
+    
+    out.write(f"{indent}```csharp\n")
+    for line in formatted_scope.splitlines():
+        out.write(f"{indent}{line}\n")
+    out.write(f"{indent}```\n\n")
+
+def render_node(node, blocks, file_cache, db_path, out, indent=""):
+    if isinstance(node, ScopeNode):
+        render_scope(node, blocks, file_cache, db_path, out, indent)
+    elif isinstance(node, LoopNode):
+        out.write(f"\n{indent}> 🔁 **[LOOP DETECTED] Eseguito per {node.iterations} iterazioni**\n")
+        out.write(f"{indent}>\n")
+        for sub_node in node.sequence:
+            render_node(sub_node, blocks, file_cache, db_path, out, indent + "> ")
+
 def generate_map():
     if LOG_PATH is None:
         print(f"Error: No log file found in the working folder: {out_dir}")
@@ -134,7 +207,7 @@ def generate_map():
     with open(LOG_PATH, 'r', encoding='utf-8') as f:
         log_lines = [line.strip() for line in f if line.strip()]
     
-    grouped_scopes = []
+    thread_streams = {}
     
     for idx, line in enumerate(log_lines):
         parts = line.split("||")
@@ -154,30 +227,28 @@ def generate_map():
         file_path = block['file_path']
         method_signature = block['method_signature']
         
-        if grouped_scopes and grouped_scopes[-1][0] == file_path and grouped_scopes[-1][1] == method_signature:
-            grouped_scopes[-1][5].append(block_id)
+        if thread_id not in thread_streams:
+            thread_streams[thread_id] = []
+            
+        stream = thread_streams[thread_id]
+        
+        if stream and isinstance(stream[-1], ScopeNode) and stream[-1].file_path == file_path and stream[-1].method_signature == method_signature:
+            stream[-1].executed_block_ids.append(block_id)
         else:
-            grouped_scopes.append((file_path, method_signature, timestamp, correlation_id, thread_id, [block_id]))
+            new_scope = ScopeNode(file_path, method_signature, timestamp, correlation_id, thread_id)
+            new_scope.executed_block_ids.append(block_id)
+            stream.append(new_scope)
 
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as out:
         out.write("# AI Tracer - Execution Map\n\n")
         out.write(f"**Generated from:** `{LOG_PATH}`\n\n")
         
-        for group in grouped_scopes:
-            file_path, method_signature, timestamp, correlation_id, thread_id, executed_block_ids = group
-            
-            out.write("---\n\n")
-            out.write(f"### ⏱️ [{timestamp}] CONTEXT SWITCH\n")
-            out.write(f"- **File:** `{file_path}`\n")
-            out.write(f"- **Method:** `{method_signature}`\n")
-            out.write(f"- **Thread ID:** {thread_id} | **Correlation ID:** `{correlation_id}`\n")
-            out.write(f"- **Executed Blocks:** {', '.join(executed_block_ids)}\n\n")
-            
-            formatted_scope = format_scope_output(file_path, method_signature, executed_block_ids, blocks, file_cache, DB_PATH)
-            
-            out.write("```csharp\n")
-            out.write(formatted_scope)
-            out.write("```\n\n")
+        for thread_id, stream in thread_streams.items():
+            out.write(f"## Thread ID: {thread_id}\n\n")
+            compressed_stream = compress_stream(stream)
+            for node in compressed_stream:
+                render_node(node, blocks, file_cache, DB_PATH, out)
+            out.write("\n---\n\n")
 
 if __name__ == "__main__":
     generate_map()
