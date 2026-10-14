@@ -79,8 +79,39 @@ def get_unexecuted_blocks(db_path, file_path, method_signature, executed_block_i
     conn.close()
     return unexecuted
 
+def expand_implicit_blocks(db_path, file_path, method_signature, executed_block_ids):
+    if not executed_block_ids:
+        return executed_block_ids
+        
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    placeholders = ','.join('?' * len(executed_block_ids))
+    cursor.execute(f"SELECT block_start_line, block_end_line FROM basic_blocks WHERE id IN ({placeholders})", executed_block_ids)
+    executed_ranges = cursor.fetchall()
+    
+    expanded_set = set(executed_block_ids)
+    
+    cursor.execute("SELECT id, block_start_line, block_end_line FROM basic_blocks WHERE file_path = ? AND method_signature = ?", (file_path, method_signature))
+    all_blocks = cursor.fetchall()
+    
+    for b_id, b_start, b_end in all_blocks:
+        b_id_str = str(b_id)
+        if b_id_str in expanded_set:
+            continue
+            
+        # Se il blocco padre contiene il blocco eseguito, è implicitamente eseguito
+        for ex_start, ex_end in executed_ranges:
+            if b_start <= ex_start and b_end >= ex_end:
+                expanded_set.add(b_id_str)
+                break
+                
+    conn.close()
+    return list(expanded_set)
+
 def format_scope_output(file_path, method_signature, executed_block_ids, blocks, file_cache, db_path):
-    unexecuted_blocks = get_unexecuted_blocks(db_path, file_path, method_signature, executed_block_ids)
+    expanded_executed_ids = expand_implicit_blocks(db_path, file_path, method_signature, executed_block_ids)
+    unexecuted_blocks = get_unexecuted_blocks(db_path, file_path, method_signature, expanded_executed_ids)
     
     first_block_id = executed_block_ids[0]
     scope_start = blocks[first_block_id]['scope_start_line']
