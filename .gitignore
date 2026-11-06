@@ -8,3 +8,9 @@ AITracer.MsBuildTask/bin/
 AITracer.MsBuildTask/obj/
 AITracer.Runtime/bin/
 AITracer.Runtime/obj/
+map_generator/RoslynAnalyzer.Tests/bin/
+map_generator/RoslynAnalyzer.Tests/obj/
+map_generator/**/__pycache__/
+map_generator/__pycache__/
+map_generator/Injection.Tests/bin/
+map_generator/Injection.Tests/obj/
