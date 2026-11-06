@@ -5,13 +5,21 @@
     <WorkingFolder>$([System.Text.RegularExpressions.Regex]::Match($(YamlContent), `working_folder:\s*&quot;?([^&quot;\r\n]+)&quot;?`).Groups[1].Value)</WorkingFolder>
     <AITracerDbPath>C:\repo\AI_tracer_v2\code_analysis\$(WorkingFolder)\basic_blocks.sqlite</AITracerDbPath>
   </PropertyGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
     <Reference Include="AITracer.Runtime">
       <HintPath>C:\repo\AI_tracer_v2\AITracer.Runtime\bin\Debug\netstandard2.0\AITracer.Runtime.dll</HintPath>
       <Private>True</Private>
     </Reference>
   </ItemGroup>
-  <Target Name="CopyAITracerRuntime" AfterTargets="Build">
-    <Copy SourceFiles="C:\repo\AI_tracer_v2\AITracer.Runtime\bin\Debug\netstandard2.0\AITracer.Runtime.dll" DestinationFolder="$(TargetDir)" />
+  <Target Name="CopyAITracerRuntime" AfterTargets="Build" Condition="'$(TargetDir)' != '' or '$(OutDir)' != ''">
+    <PropertyGroup>
+      <_AITracerDestFolder Condition="'$(TargetDir)' != ''">$(TargetDir)</_AITracerDestFolder>
+      <_AITracerDestFolder Condition="'$(_AITracerDestFolder)' == ''">$(OutDir)</_AITracerDestFolder>
+    </PropertyGroup>
+    <Copy 
+      SourceFiles="C:\repo\AI_tracer_v2\AITracer.Runtime\bin\Debug\netstandard2.0\AITracer.Runtime.dll" 
+      DestinationFolder="$(_AITracerDestFolder)" 
+      SkipUnchangedFiles="true"
+      Condition="'$(_AITracerDestFolder)' != ''" />
   </Target>
 </Project>

@@ -5,42 +5,45 @@ using System.Text;
 
 namespace RoslynAnalyzer
 {
-    public class MarkdownLogger
+    public class MarkdownLogger : IDisposable
     {
-        private readonly StringBuilder _sb;
+        private readonly StreamWriter _sb;
+        private readonly string temporary;
         public string FilePath { get; }
 
         public MarkdownLogger(string outputDir)
         {
-            _sb = new StringBuilder();
-            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
             string fileName = $"[{timestamp}]_basic_blocks.md";
             FilePath = Path.Combine(outputDir, fileName);
+            temporary=FilePath+"."+Guid.NewGuid().ToString("N")+".tmp";
+            _sb=new StreamWriter(temporary,false,Encoding.UTF8);
 
-            _sb.AppendLine($"# AI Tracer - Estrazione Basic Blocks");
-            _sb.AppendLine($"Data di esecuzione: {DateTime.Now:O}");
-            _sb.AppendLine();
+            _sb.WriteLine($"# AI Tracer - Estrazione Basic Blocks");
+            _sb.WriteLine($"Data di esecuzione: {DateTime.Now:O}");
+            _sb.WriteLine();
         }
 
         public void LogBlocks(string projectName, string documentName, List<TraceableBlock> blocks)
         {
-            _sb.AppendLine($"## Progetto: {projectName} | File: {documentName}");
-            _sb.AppendLine();
+            _sb.WriteLine($"## Progetto: {projectName} | File: {documentName}");
+            _sb.WriteLine();
 
             foreach (var block in blocks)
             {
-                _sb.AppendLine($"### Metodo: `{block.MethodName}` (Line: {block.StartLine})");
-                _sb.AppendLine($"**Motivazione**: {block.Reason}");
-                _sb.AppendLine("```csharp");
-                _sb.AppendLine(block.BlockText);
-                _sb.AppendLine("```");
-                _sb.AppendLine();
+                _sb.WriteLine($"### Metodo: `{block.MethodName}` (Line: {block.StartLine})");
+                _sb.WriteLine($"**Motivazione**: {block.Reason}");
+                _sb.WriteLine("```csharp");
+                _sb.WriteLine(block.BlockText);
+                _sb.WriteLine("```");
+                _sb.WriteLine();
             }
         }
 
         public void Save()
         {
-            File.WriteAllText(FilePath, _sb.ToString());
+            _sb.Dispose();File.Move(temporary,FilePath);
         }
+        public void Dispose() { _sb.Dispose();if(File.Exists(temporary))File.Delete(temporary); }
     }
 }

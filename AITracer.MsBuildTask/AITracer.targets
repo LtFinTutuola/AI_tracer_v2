@@ -12,7 +12,7 @@
 
   <UsingTask TaskName="AITracer.MsBuildTask.InjectTracesTask" AssemblyFile="$(AITracerTaskAssembly)" />
 
-  <Target Name="AITracerInject" BeforeTargets="CoreCompile">
+  <Target Name="AITracerInject" BeforeTargets="CoreCompile" Condition="'@(Compile)' != '' and '$(DesignTimeBuild)' != 'true' and '$(AITracerAnalysis)' != 'true'">
     <InjectTracesTask 
         Compile="@(Compile)" 
         DatabasePath="$(AITracerDbPath)" 

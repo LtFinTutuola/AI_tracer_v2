@@ -16,5 +16,7 @@ namespace RoslynAnalyzer
         public int InjectionOffset { get; set; }
         public string Reason { get; set; }
         public bool ToTrace { get; set; } = true;
+        public bool WrapInBlock { get; set; } = false;
+        public int StatementEndOffset { get; set; } = 0;
     }
 }

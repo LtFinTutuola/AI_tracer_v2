@@ -20,11 +20,16 @@ namespace RoslynAnalyzer
         public int BlockEndLine { get; set; }
         public int InjectionOffset { get; set; }
         public string Reason { get; set; }
+        public bool WrapInBlock { get; set; } = false;
+        public int StatementEndOffset { get; set; } = 0;
+        // Context-only evidence; never changes legacy probe selection.
+        public int? CfgOrdinal { get; set; }
     }
 
     public class BlockExtractor
     {
-        public List<TraceableBlock> ExtractBlocks(SemanticModel semanticModel, SyntaxNode syntaxRoot)
+        public List<TraceableBlock> ExtractBlocks(SemanticModel semanticModel, SyntaxNode syntaxRoot,
+            Func<BaseMethodDeclarationSyntax, ControlFlowGraph?>? graphProvider = null)
         {
             var results = new List<TraceableBlock>();
             var mappedNodes = new HashSet<SyntaxNode>();
@@ -37,7 +42,7 @@ namespace RoslynAnalyzer
                 ControlFlowGraph cfg = null;
                 try
                 {
-                    cfg = ControlFlowGraph.Create(method, semanticModel);
+                    cfg = graphProvider == null ? ControlFlowGraph.Create(method, semanticModel) : graphProvider(method);
                 }
                 catch (Exception ex)
                 {
@@ -66,6 +71,7 @@ namespace RoslynAnalyzer
 
                 var branchTargets = new HashSet<BasicBlock>();
                 var fallbackTargets = new HashSet<BasicBlock>();
+                var methodBlocksByOffset = new Dictionary<int, TraceableBlock>();
 
                 foreach (var b in cfg.Blocks)
                 {
@@ -121,9 +127,6 @@ namespace RoslynAnalyzer
                     var ops = block.Operations.Select(o => o.Syntax).ToList();
                     if (block.BranchValue != null) ops.Add(block.BranchValue.Syntax);
                     
-                    // Non scartiamo più i blocchi con zero operazioni se sono branch target!
-                    // Un return; puro in Roslyn non ha IOperations ma è fondamentale per le Guard Clauses.
-
                     var statements = new List<SyntaxNode>();
                     CatchClauseSyntax catchNode = null;
 
@@ -168,11 +171,36 @@ namespace RoslynAnalyzer
 
                     if (!isSignificant) continue;
 
-                    string reason = isCatch ? "Exception Handler (Catch)" :
-                                    isExitNode ? "Proof of Completion (Final Exit Block)" :
-                                    isExplicitFallback ? "Explicit Fallback (Else/Default)" :
-                                    isBranchTarget ? "Branch Target (True/Case Divergence)" :
-                                    hasJumpStatement ? "Early Exit (Guard Clause/Jump)" : "Significant Block";
+                    // Semantic priority: Branch divergence takes precedence over exit status
+                    string reason;
+                    if (isCatch)
+                    {
+                        reason = "Exception Handler (Catch)";
+                    }
+                    else if (isBranchTarget)
+                    {
+                        reason = "Branch Target (True/Case Divergence)";
+                    }
+                    else if (isExplicitFallback)
+                    {
+                        reason = "Explicit Fallback (Else/Default)";
+                    }
+                    else if (hasJumpStatement && !isExitNode)
+                    {
+                        reason = "Early Exit (Guard Clause/Jump)";
+                    }
+                    else if (isExitNode)
+                    {
+                        reason = "Proof of Completion (Final Exit Block)";
+                    }
+                    else if (hasJumpStatement)
+                    {
+                        reason = "Early Exit (Guard Clause/Jump)";
+                    }
+                    else
+                    {
+                        reason = "Significant Block";
+                    }
 
                     string blockText = "";
                     int startLine = 0;
@@ -230,19 +258,47 @@ namespace RoslynAnalyzer
                     blockText = CleanEmptyLines(blockText);
                     if (string.IsNullOrWhiteSpace(blockText)) continue;
 
-                    results.Add(new TraceableBlock
+                    bool wrapInBlock = false;
+                    int statementEndOffset = 0;
+                    var firstStatement = statements.FirstOrDefault();
+                    if (firstStatement is StatementSyntax ss && RequiresBlockWrapping(ss))
                     {
-                        MethodName = methodName,
-                        MethodSignature = methodSignature,
-                        BlockText = blockText,
-                        StartLine = startLine,
-                        ScopeStartLine = scopeStartLine,
-                        ScopeEndLine = scopeEndLine,
-                        BlockStartLine = blockStartLine,
-                        BlockEndLine = blockEndLine,
-                        InjectionOffset = injectionOffset,
-                        Reason = reason
-                    });
+                        wrapInBlock = true;
+                        statementEndOffset = ss.Span.End;
+                    }
+
+                    // Intra-method deduplication: coalesce multiple micro-blocks targeting the same injection offset
+                    if (methodBlocksByOffset.TryGetValue(injectionOffset, out var existingBlock))
+                    {
+                        if (GetReasonPriority(reason) > GetReasonPriority(existingBlock.Reason))
+                        {
+                            existingBlock.Reason = reason;
+                        }
+                        if (!existingBlock.WrapInBlock && wrapInBlock)
+                        {
+                            existingBlock.WrapInBlock = true;
+                            existingBlock.StatementEndOffset = statementEndOffset;
+                        }
+                    }
+                    else
+                    {
+                        methodBlocksByOffset[injectionOffset] = new TraceableBlock
+                        {
+                            MethodName = methodName,
+                            MethodSignature = methodSignature,
+                            BlockText = blockText,
+                            StartLine = startLine,
+                            ScopeStartLine = scopeStartLine,
+                            ScopeEndLine = scopeEndLine,
+                            BlockStartLine = blockStartLine,
+                            BlockEndLine = blockEndLine,
+                            InjectionOffset = injectionOffset,
+                            Reason = reason,
+                            WrapInBlock = wrapInBlock,
+                            StatementEndOffset = statementEndOffset,
+                            CfgOrdinal = block.Ordinal
+                        };
+                    }
 
                     // Tracciamo tutti i nodi coperti da questo blocco
                     if (catchNode != null)
@@ -258,10 +314,10 @@ namespace RoslynAnalyzer
                 // --- FALLBACK SINTATTICO PER GUARD CLAUSES (PURI JUMP) ---
                 // Roslyn omette i blocchi composti solo da un return/break dal CFG. 
                 // Li recuperiamo analizzando l'albero sintattico.
-                var allJumps = method.DescendantNodes().Where(n => n is StatementSyntax s && IsJumpStatement(s)).Cast<StatementSyntax>();
+                var allJumps = method.DescendantNodes(n => n is not LocalFunctionStatementSyntax && n is not AnonymousFunctionExpressionSyntax).Where(n => n is StatementSyntax s && IsJumpStatement(s)).Cast<StatementSyntax>();
                 foreach (var jump in allJumps)
                 {
-                    if (!mappedNodes.Contains(jump))
+                    if (!mappedNodes.Contains(jump) && !methodBlocksByOffset.ContainsKey(jump.SpanStart))
                     {
                         bool isCovered = false;
                         var parent = jump.Parent;
@@ -277,7 +333,8 @@ namespace RoslynAnalyzer
                         
                         if (!isCovered)
                         {
-                            results.Add(new TraceableBlock
+                            bool jumpWrap = RequiresBlockWrapping(jump);
+                            methodBlocksByOffset[jump.SpanStart] = new TraceableBlock
                             {
                                 MethodName = methodName,
                                 MethodSignature = methodSignature,
@@ -288,14 +345,53 @@ namespace RoslynAnalyzer
                                 BlockStartLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).StartLinePosition.Line + 1,
                                 BlockEndLine = syntaxRoot.SyntaxTree.GetLineSpan(jump.Span).EndLinePosition.Line + 1,
                                 InjectionOffset = jump.SpanStart,
-                                Reason = "Early Exit (Guard Clause/Jump - CFG Fallback)"
-                            });
+                                Reason = "Early Exit (Guard Clause/Jump - CFG Fallback)",
+                                WrapInBlock = jumpWrap,
+                                StatementEndOffset = jumpWrap ? jump.Span.End : 0
+                            };
                         }
                     }
                 }
+
+                results.AddRange(methodBlocksByOffset.Values);
             }
 
             return results.OrderBy(b => b.StartLine).ToList();
+        }
+
+        private static bool RequiresBlockWrapping(StatementSyntax stmt)
+        {
+            if (stmt == null || stmt is BlockSyntax) return false;
+
+            var parent = stmt.Parent;
+            if (parent is IfStatementSyntax ifStmt && ifStmt.Statement == stmt)
+                return true;
+            if (parent is ElseClauseSyntax elseClause && elseClause.Statement == stmt)
+                return true;
+            if (parent is WhileStatementSyntax whileStmt && whileStmt.Statement == stmt)
+                return true;
+            if (parent is ForStatementSyntax forStmt && forStmt.Statement == stmt)
+                return true;
+            if (parent is ForEachStatementSyntax forEachStmt && forEachStmt.Statement == stmt)
+                return true;
+            if (parent is DoStatementSyntax doStmt && doStmt.Statement == stmt)
+                return true;
+
+            return false;
+        }
+
+        private static int GetReasonPriority(string reason)
+        {
+            switch (reason)
+            {
+                case "Exception Handler (Catch)": return 6;
+                case "Branch Target (True/Case Divergence)": return 5;
+                case "Explicit Fallback (Else/Default)": return 4;
+                case "Early Exit (Guard Clause/Jump)": return 3;
+                case "Early Exit (Guard Clause/Jump - CFG Fallback)": return 3;
+                case "Proof of Completion (Final Exit Block)": return 2;
+                default: return 1;
+            }
         }
 
         private SyntaxNode GetEnclosingTarget(SyntaxNode node)

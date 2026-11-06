@@ -37,8 +37,33 @@ namespace AITracer.MsBuildTask
                 using (var connection = new SqliteConnection($"Data Source={DatabasePath}"))
                 {
                     connection.Open();
+                    
+                    // Check if optional columns exist for backwards compatibility with older databases
+                    bool hasWrapInBlock = false;
+                    bool hasStatementEndOffset = false;
+                    using (var colCmd = connection.CreateCommand())
+                    {
+                        colCmd.CommandText = "PRAGMA table_info(basic_blocks)";
+                        using (var colReader = colCmd.ExecuteReader())
+                        {
+                            while (colReader.Read())
+                            {
+                                var colName = colReader.GetString(1);
+                                if (string.Equals(colName, "wrap_in_block", StringComparison.OrdinalIgnoreCase)) hasWrapInBlock = true;
+                                if (string.Equals(colName, "statement_end_offset", StringComparison.OrdinalIgnoreCase)) hasStatementEndOffset = true;
+                            }
+                        }
+                    }
+
+                    var query = "SELECT id, file_path, injection_line, injection_offset";
+                    if (hasWrapInBlock) query += ", wrap_in_block";
+                    else query += ", 0";
+                    if (hasStatementEndOffset) query += ", statement_end_offset";
+                    else query += ", 0";
+                    query += " FROM basic_blocks WHERE to_trace = 1";
+
                     var cmd = connection.CreateCommand();
-                    cmd.CommandText = "SELECT id, file_path, injection_line, injection_offset FROM basic_blocks WHERE to_trace = 1";
+                    cmd.CommandText = query;
                     
                     using (var reader = cmd.ExecuteReader())
                     {
@@ -48,6 +73,8 @@ namespace AITracer.MsBuildTask
                             var filePath = reader.GetString(1);
                             var injectionLine = reader.GetInt32(2);
                             var injectionOffset = reader.GetInt32(3);
+                            var wrapInBlock = reader.GetInt32(4) == 1;
+                            var statementEndOffset = reader.GetInt32(5);
 
                             var normPath = Path.GetFullPath(filePath);
                             if (!blocksByFile.TryGetValue(normPath, out var list))
@@ -55,7 +82,14 @@ namespace AITracer.MsBuildTask
                                 list = new List<BlockInfo>();
                                 blocksByFile[normPath] = list;
                             }
-                            list.Add(new BlockInfo { Id = id, InjectionLine = injectionLine, InjectionOffset = injectionOffset });
+                            list.Add(new BlockInfo 
+                            { 
+                                Id = id, 
+                                InjectionLine = injectionLine, 
+                                InjectionOffset = injectionOffset,
+                                WrapInBlock = wrapInBlock,
+                                StatementEndOffset = statementEndOffset
+                            });
                         }
                     }
                 }
@@ -77,14 +111,61 @@ namespace AITracer.MsBuildTask
                 {
                     try
                     {
+                        // Defensive deduplication: ensure only one trace call per injection offset in this file
+                        var uniqueBlocks = new Dictionary<int, BlockInfo>();
+                        foreach (var b in blocks)
+                        {
+                            if (!uniqueBlocks.ContainsKey(b.InjectionOffset))
+                            {
+                                uniqueBlocks[b.InjectionOffset] = b;
+                            }
+                        }
+
+                        // Collect all textual insertions needed
+                        var insertions = new List<TextInsertion>();
+                        foreach (var block in uniqueBlocks.Values)
+                        {
+                            if (block.WrapInBlock && block.StatementEndOffset > block.InjectionOffset)
+                            {
+                                // Single-statement branch body (e.g. if (...) return true;) needing block wrapping
+                                insertions.Add(new TextInsertion
+                                {
+                                    Offset = block.StatementEndOffset,
+                                    Text = "\n}",
+                                    IsEndWrapper = true
+                                });
+                                insertions.Add(new TextInsertion
+                                {
+                                    Offset = block.InjectionOffset,
+                                    Text = $"{{\n#line hidden\nAITracer.Runtime.TraceContext.Log({block.Id});\n#line default\n",
+                                    IsEndWrapper = false
+                                });
+                            }
+                            else
+                            {
+                                insertions.Add(new TextInsertion
+                                {
+                                    Offset = block.InjectionOffset,
+                                    Text = $"\n#line hidden\nAITracer.Runtime.TraceContext.Log({block.Id});\n#line default\n",
+                                    IsEndWrapper = false
+                                });
+                            }
+                        }
+
                         // Order descending by Offset to prevent shifting subsequent offsets
-                        var sortedBlocks = blocks.OrderByDescending(b => b.InjectionOffset).ToList();
+                        var sortedInsertions = insertions
+                            .OrderByDescending(i => i.Offset)
+                            .ThenBy(i => i.IsEndWrapper ? 0 : 1)
+                            .ToList();
+
                         var text = File.ReadAllText(fullPath);
 
-                        foreach (var block in sortedBlocks)
+                        foreach (var ins in sortedInsertions)
                         {
-                            var traceLines = $"\n#line hidden\nAITracer.Runtime.TraceContext.Log({block.Id});\n#line default\n";
-                            text = text.Insert(block.InjectionOffset, traceLines);
+                            if (ins.Offset >= 0 && ins.Offset <= text.Length)
+                            {
+                                text = text.Insert(ins.Offset, ins.Text);
+                            }
                         }
 
                         // Add <auto-generated> header to bypass StyleCop/SonarQube strict rules on the generated file
@@ -126,6 +207,15 @@ namespace AITracer.MsBuildTask
             public int Id { get; set; }
             public int InjectionLine { get; set; }
             public int InjectionOffset { get; set; }
+            public bool WrapInBlock { get; set; }
+            public int StatementEndOffset { get; set; }
+        }
+
+        private class TextInsertion
+        {
+            public int Offset { get; set; }
+            public string Text { get; set; }
+            public bool IsEndWrapper { get; set; }
         }
     }
 }
