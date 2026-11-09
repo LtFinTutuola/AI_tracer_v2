@@ -23,4 +23,21 @@ public sealed class InputRegistry
         }
     }
     public string Manifest()=>JsonSerializer.Serialize(hashes.OrderBy(p=>p.Key));
+    public static void VerifyManifest(string manifest,CancellationToken token=default,string? excluding=null)
+    {
+        var entries=JsonSerializer.Deserialize<KeyValuePair<string,string>[]>(manifest)??Array.Empty<KeyValuePair<string,string>>();
+        foreach(var entry in entries) {
+            token.ThrowIfCancellationRequested();
+            if(excluding!=null&&string.Equals(Path.GetFullPath(entry.Key),Path.GetFullPath(excluding),StringComparison.OrdinalIgnoreCase))continue;
+            if(!File.Exists(entry.Key)||Hash(entry.Key)!=entry.Value)throw new InvalidOperationException("Known input changed since extraction: "+entry.Key);
+        }
+    }
+    public static string ReplacePolicy(string manifest,string? previous,string policy)
+    {
+        policy=Path.GetFullPath(policy);if(!string.IsNullOrEmpty(previous))previous=Path.GetFullPath(previous);
+        var entries=(JsonSerializer.Deserialize<KeyValuePair<string,string>[]>(manifest)??Array.Empty<KeyValuePair<string,string>>())
+            .Where(p=>!string.Equals(p.Key,previous,StringComparison.OrdinalIgnoreCase)&&!string.Equals(p.Key,policy,StringComparison.OrdinalIgnoreCase)).ToList();
+        entries.Add(new(Path.GetFullPath(policy),Hash(policy)));
+        return JsonSerializer.Serialize(entries.OrderBy(p=>p.Key,StringComparer.OrdinalIgnoreCase));
+    }
 }

@@ -176,6 +176,16 @@ class ReaderTests(unittest.TestCase):
         for query in queries:
             if any(t in query for t in ('flow_nodes', 'flow_points', 'flow_edges', 'call_sites', 'call_targets')):
                 self.assertIn('WHERE', query.upper())
+
+    def test_schema5_interest_evidence(self):
+        self.mutate('''UPDATE analysis_manifest SET value='5' WHERE key='schema_version';
+            CREATE TABLE trace_selection_profiles(id TEXT,status TEXT,options_json TEXT,metrics_json TEXT);
+            CREATE TABLE trace_selection_decisions(legacy_id INTEGER,profile_id TEXT,enabled INTEGER,reason TEXT);
+            CREATE TABLE trace_interest_evidence(legacy_id INTEGER,rule TEXT,detail TEXT);
+            INSERT INTO trace_interest_evidence VALUES(1,'application_decision','permission true arm');''')
+        context = self.reader.get_block_context(1)
+        self.assertEqual(context['interest_evidence'], [{'rule': 'application_decision', 'detail': 'permission true arm'}])
+        self.assertFalse(context['interest_evidence_has_more'])
         self.assertLessEqual(len(self.reader.cache), 512)
 
     def test_pagination_and_subgraph_budget(self):

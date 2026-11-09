@@ -12,6 +12,35 @@ DLL = ROOT / 'map_generator/RoslynAnalyzer/bin/Debug/net8.0/RoslynAnalyzer.dll'
 
 
 class SelectionPipelineTests(unittest.TestCase):
+    def test_application_pipeline_and_copy(self):
+        policy = self.folder / 'application.json'
+        policy.write_text(json.dumps(dict(version=1, name='pipeline-application', rules=[
+            dict(type='Target', member='Root', role='operation'),
+            dict(type='Target', member='Branch', role='operation')])))
+        output = self.folder / 'application-mode'
+        arguments = ['--selection-mode', 'application', '--ambiguity-budget', '0',
+                     '--observation-policy', str(policy), '--selection-timeout-seconds', '60']
+        run = self.run_analyzer(output, *arguments)
+        self.assertIn(run.returncode, (0, 2), run.stdout + run.stderr)
+        summary = json.loads(run.stdout.splitlines()[-1])
+        self.assertEqual(summary['selection']['algorithm'], 'application_observations_v1')
+        self.assertIsNone(summary['selection']['first_level'])
+        self.assertIsNone(summary['selection']['interest_filter'])
+        self.assertTrue((output / 'application-profile-report.json').exists())
+        with closing(sqlite3.connect((output / 'basic_blocks.sqlite').as_uri() + '?mode=ro', uri=True)) as database:
+            flags = database.execute('SELECT id,to_trace FROM basic_blocks ORDER BY id').fetchall()
+            self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '6')
+            self.assertEqual(database.execute('SELECT count(*) FROM application_observations WHERE status=\'modeled\'').fetchone()[0],
+                             database.execute('SELECT count(DISTINCT observation_id) FROM application_probe_bindings').fetchone()[0])
+            self.assertEqual(database.execute('SELECT count(*) FROM basic_blocks').fetchone()[0], summary['counts']['basic_blocks'])
+        copy = self.folder / 'application-copy'
+        qualification = subprocess.run(['dotnet', str(DLL), '--select-catalog', str(output / 'basic_blocks.sqlite'), str(copy), *arguments],
+                                       text=True, capture_output=True, timeout=120)
+        self.assertIn(qualification.returncode, (0, 2), qualification.stdout + qualification.stderr)
+        with closing(sqlite3.connect((copy / 'basic_blocks.sqlite').as_uri() + '?mode=ro', uri=True)) as database:
+            self.assertEqual(flags, database.execute('SELECT id,to_trace FROM basic_blocks ORDER BY id').fetchall())
+        self.assertFalse((self.folder / 'bin/Debug/net8.0/Target.dll').exists(), 'Target application was not compiled')
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix='trace-selection-pipeline-')
@@ -67,7 +96,7 @@ EndGlobal
                 with closing(sqlite3.connect((output / 'basic_blocks.sqlite').as_uri() + '?mode=ro', uri=True)) as database:
                     self.assertEqual(database.execute('SELECT count(*),sum(to_trace) FROM basic_blocks').fetchone(), (3, 2 if enabled else 3))
                     self.assertEqual(database.execute('SELECT count(*) FROM trace_selection_decisions').fetchone()[0], 3)
-                    self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '4')
+                    self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '6')
                 if enabled:
                     self.assertEqual(selection['validation']['SilentExecutions'], 0)
                     self.assertEqual(selection['validation']['EventReductionFraction'], .5)
@@ -84,6 +113,19 @@ EndGlobal
         self.assertEqual(run.returncode, 1)
         self.assertNotIn('open_solution', run.stdout)
         self.assertFalse((self.folder / 'invalid').exists())
+
+    def test_interest_filter_pipeline(self):
+        output = self.folder / 'interest'
+        run = self.run_analyzer(output, '--interest-filter', 'true', '--interest-target-fraction', '.325',
+                                '--selection-samples-per-root', '64', '--selection-timeout-seconds', '60')
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        summary = json.loads(run.stdout.splitlines()[-1])
+        self.assertEqual(summary['selection']['metrics_scope'], 'experimental_application_interest_profile')
+        self.assertEqual(summary['selection']['interest_filter']['uncovered_requirements'], 0)
+        self.assertEqual(summary['selection']['interest_filter']['audit']['silent_interest_paths_after_repair'], 0)
+        with closing(sqlite3.connect((output / 'basic_blocks.sqlite').as_uri() + '?mode=ro', uri=True)) as database:
+            self.assertEqual(database.execute('SELECT count(*) FROM trace_selection_decisions').fetchone()[0], 3)
+            self.assertLess(database.execute('SELECT sum(to_trace) FROM basic_blocks').fetchone()[0], 3)
 
 
 if __name__ == '__main__':

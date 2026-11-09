@@ -45,22 +45,28 @@ public sealed class TraceSelectionResult
     public TraceSelectionOptions Options {get;set;}=new();
     public long TrainingExecutions {get;set;}
     public long CalibrationExecutions {get;set;}
-    public const string Algorithm="ordered_partition_greedy_local_qualification_v3";
-    public object Summary=>new {algorithm=Algorithm,status=Status,partial=Partial,
+    public InterestFilterResult? Interest {get;set;}
+    public JsonElement? FirstLevel {get;set;}
+    public ApplicationPlan? Application {get;set;}
+    public string AlgorithmName=>Application==null?Algorithm:ApplicationPlan.Algorithm;
+    public const string Algorithm="ordered_partition_greedy_application_interest_v4";
+    public object Summary=>new {algorithm=AlgorithmName,status=Status,partial=Partial,
         options=Options,
-        qualification_policy="protect_unqualified_method_owners_only",
-        incomplete_callers_coverage="partial; qualified callees remain eligible",
+        qualification_policy=Application==null?"protect_unqualified_method_owners_only":"exact_source_witnesses_for_declared_observations",
+        incomplete_callers_coverage=Application==null?"partial; qualified callees remain eligible":"opaque regions explicit; internal probes not globally protected",
         fallback_reason=FallbackReason,probes=ProbeCount,disabled=Disabled.Count,baseline_disabled=BaselineDisabledCount,
-        enabled=ProbeCount-BaselineDisabledCount-Disabled.Count,metrics_scope=Status=="fallback"?"discarded_candidate":"applied_profile",
+        enabled=ProbeCount-BaselineDisabledCount-Disabled.Count,metrics_scope=Application!=null?"declared_application_observations":Status=="fallback"?"discarded_candidate":Interest==null?"applied_profile":"experimental_application_interest_profile",
+        application=Application?.Summary,
+        first_level=FirstLevel,interest_filter=Interest?.Summary,
         protected_probes=Protected.Count,protected_reasons=Protected.Values.GroupBy(reason=>reason).ToDictionary(group=>group.Key,group=>group.Count()),
         roots=Roots.Count,roots_without_events=RootsWithoutEvents,root_statuses=Roots.GroupBy(root=>root.Status).ToDictionary(group=>group.Key,group=>group.Count()),
-        qualified_roots=Roots.Count(root=>root.Status=="qualified"),fit=Fit==null?null:new {
+        qualified_roots=Roots.Count(root=>root.Status==(Application==null?"qualified":"observed")),fit=Fit==null?null:new {
             TrainingExecutions,CalibrationExecutions,Fit.TrainingAmbiguous,Fit.CalibrationAmbiguous,
             training_ambiguity_fraction=TrainingExecutions==0?0:(double)Fit.TrainingAmbiguous/TrainingExecutions,
             calibration_ambiguity_fraction=CalibrationExecutions==0?0:(double)Fit.CalibrationAmbiguous/CalibrationExecutions,
             Fit.MaximumCandidates,Fit.EventsBefore,Fit.EventsAfter,event_reduction_fraction=Fit.EventsBefore==0?0:1-(double)Fit.EventsAfter/Fit.EventsBefore,Fit.TimeLimited},
         validation=Validation,validation_before_repair=ValidationBeforeRepair,
-        validation_role=RestoredForActivity.Count>0?"repair_calibration":"independent_validation",
+        validation_role=Application!=null?"constructive_source_coverage; not exhaustive runtime accuracy":Interest!=null?"technical_reassessment; not functional accuracy":RestoredForActivity.Count>0?"repair_calibration":"independent_validation",
         activity_repair=new {restored_count=RestoredForActivity.Count,restored_ids=RestoredForActivity.OrderBy(id=>id)},
         sample_outcomes=SampleOutcomes,opaque_calls=OpaqueCalls,
         peak_buffer_bytes=PeakBufferBytes,duration_seconds=DurationSeconds,corpus_fingerprint=CorpusFingerprint};
@@ -75,6 +81,7 @@ public static class TraceSelectionEngine
         options.Validate();var result=new TraceSelectionResult {Options=options};var resources=new SelectionResources(options,token);
         token.ThrowIfCancellationRequested();
         if(!options.Enabled){result.Status="disabled";return result;}
+        if(options.Mode=="application")return ApplicationObservationBuilder.Build(catalogPath,options,token,progress);
         TraceSelectionModel? model=null;
         try {
             progress?.Invoke("selection_load",options);model=new(catalogPath,resources,options.MaxMemoryMb);model.Load();
@@ -200,6 +207,50 @@ public static class TraceSelectionEngine
             result.Status=result.Partial?"applied_partial":"applied";
             string? rejection=ValidationRejection(result.Validation,result.Roots.Any(root=>root.Status=="qualified"));
             if(rejection!=null)Fallback(rejection);
+            if(options.InterestFilterEnabled&&result.Status!="fallback") {
+                result.PeakBufferBytes=resources.PeakBytes;result.DurationSeconds=resources.Seconds;
+                result.FirstLevel=JsonSerializer.SerializeToElement(result.Summary);
+                progress?.Invoke("selection_interest_filter",new {target_fraction=options.InterestTargetFraction});
+                model.ClearCache();
+                var interest=ApplicationInterestFilter.Select(catalogPath,options,result.Disabled,resources.Check,resources.Reserve,resources.Release);
+                resources.Reserve(interest.RetainedBytes);result.Interest=interest;
+                // Bounded fresh cohort. Repair recognized application witnesses only;
+                // paths without such annotations may be quiet (not a purity proof).
+                progress?.Invoke("selection_interest_audit",new {roots=result.Roots.Count,attempts_per_root=16});
+                foreach(var root in result.Roots)for(int attempt=0;attempt<16;attempt++) {
+                    resources.Check();
+                    if(resources.Seconds-lastProgress>=5) {
+                        progress?.Invoke("selection_interest_audit",new {elapsed_seconds=resources.Seconds,completed=interest.AuditCompleted,restored=interest.AuditRestoredIds.Count});lastProgress=resources.Seconds;
+                    }
+                    var sample=model.Sample(root.MethodId,3,attempt,options);
+                    if(sample.Word==null){interest.AuditIncomplete++;continue;}
+                    interest.AuditCompleted++;
+                    bool relevant=sample.Word.Events.Any(interest.InterestCandidates.Contains);
+                    if(relevant)interest.AuditApplicationPaths++;
+                    if(sample.Word.Events.Length==0||sample.Word.Events.Any(interest.Enabled.Contains))continue;
+                    if(!relevant){interest.AuditSilentTechnical++;continue;}
+                    interest.AuditSilentBeforeRepair++;
+                    long restore=sample.Word.Events.Where(interest.InterestCandidates.Contains).Min();
+                    interest.AuditRestoredIds.Add(restore);
+                }
+                foreach(long restore in interest.AuditRestoredIds) {
+                    interest.Enabled.Add(restore);interest.RequiredIds.Add(restore);interest.Reasons[restore]="interest_activity_witness_restored";
+                }
+                // Recheck the fresh cohort after every restoration. These samples
+                // become repair calibration; no independent accuracy is claimed.
+                foreach(var root in result.Roots)for(int attempt=0;attempt<16;attempt++) {
+                    var sample=model.Sample(root.MethodId,3,attempt,options);
+                    if(sample.Word is {Events.Length:>0} word&&word.Events.Any(interest.InterestCandidates.Contains)&&!word.Events.Any(interest.Enabled.Contains))interest.AuditSilentAfterRepair++;
+                }
+                if(interest.UncoveredRequirements>0||interest.AuditSilentAfterRepair>0)throw new InvalidOperationException("Interest-filter witness validation failed");
+                model.ClearCache();interest.Inputs.Verify(token);resources.Check();
+                result.Disabled=model.Probes.Values.Where(probe=>probe.Baseline&&!interest.Enabled.Contains(probe.Id)).Select(probe=>probe.Id).ToHashSet();
+                result.Protected.Clear();model.Protected.Clear();
+                foreach(long id in interest.RequiredIds)model.Protected[id]=interest.Reasons[id];
+                result.Fit=null;result.ValidationBeforeRepair=null;result.RestoredForActivity.Clear();
+                result.Validation=Assess(fitRows.Keys,validation,result.Disabled,resources.Check,resources.Reserve,resources.Release);
+                result.Partial=true;result.Status="applied_partial";
+            }
             return result;
         } catch(SelectionMemoryException){Fallback("memory_limit");return result;}
           catch(SelectionDeadlineException){Fallback("verification_or_setup_timeout");return result;}

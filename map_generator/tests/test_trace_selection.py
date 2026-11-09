@@ -31,6 +31,18 @@ class SelectionConfigurationTests(unittest.TestCase):
         self.assertTrue(selection_options({'ambiguity_budget': 0})['enabled'])
         self.assertFalse(selection_options({'enabled': False})['enabled'])
 
+    def test_interest_options(self):
+        config = {'target_solution': 'test.sln', 'target_framework': 'net8.0', 'working_folder': 'test',
+                  'trace_selection': {'interest_filter_enabled': True, 'interest_target_fraction': .325}}
+        command = build_command(config, ROOT)
+        self.assertEqual(command[command.index('--interest-filter') + 1], 'true')
+        self.assertEqual(command[command.index('--interest-target-fraction') + 1], '0.325')
+        for bad in ({'interest_target_fraction': True}, {'interest_target_fraction': 0},
+                    {'interest_target_fraction': 1.1}, {'interest_target_fraction': float('nan')},
+                    {'interest_filter_enabled': 'true'}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                selection_options(bad)
+
     def test_invalid_types_and_limits(self):
         for bad in [None, [], {'ambiguity_budget': True}, {'ambiguity_budget': '1%'},
                     {'ambiguity_budget': float('nan')}, {'ambiguity_budget': float('inf')},

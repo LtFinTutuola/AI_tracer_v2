@@ -14,6 +14,7 @@ internal sealed class SelectionResources(TraceSelectionOptions options,Cancellat
     public long Bytes {get;private set;}
     public long PeakBytes {get;private set;}
     public double Seconds=>clock.Elapsed.TotalSeconds;
+    public long MaxBytes=>options.MaxMemoryMb*1024L*1024L;
     public double PhaseFraction {get;set;}=.4;
     public bool HasTime {get {token.ThrowIfCancellationRequested();return Seconds<options.MaxDurationSeconds*PhaseFraction;}}
     public void Check() {if(!HasTime)throw new SelectionDeadlineException();}

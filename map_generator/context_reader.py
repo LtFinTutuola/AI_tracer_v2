@@ -1,9 +1,10 @@
-"""Read-only schema 3/4 queries. Expansion is bounded and selection remains visible."""
+"""Read-only schema 3..6 queries and bounded application trace decoding."""
 import argparse
 from collections import OrderedDict, deque
 import json
 from pathlib import Path
 import sqlite3
+import sys
 
 
 class BlockContextReader:
@@ -13,8 +14,8 @@ class BlockContextReader:
         self.cache = OrderedDict()
         try:
             self.manifest = dict(self.connection.execute('SELECT key,value FROM analysis_manifest'))
-            if self.manifest.get('schema_version') not in ('3', '4') or self.manifest.get('state') != 'validated':
-                raise ValueError('Schema 3 or 4 validated catalog required; regenerate the database')
+            if self.manifest.get('schema_version') not in ('3', '4', '5', '6') or self.manifest.get('state') != 'validated':
+                raise ValueError('Schema 3..6 validated catalog required; regenerate the database')
         except Exception:
             self.connection.close()
             raise
@@ -64,7 +65,7 @@ class BlockContextReader:
                                     AND NOT EXISTS(SELECT 1 FROM legacy_probe_variants s WHERE s.legacy_id=? AND s.variant_id=v.id)
                                   ORDER BY v.id''', (legacy[0]['file_path'], legacy_id))
         selection = None
-        if self.manifest.get('schema_version') == '4':
+        if self.manifest.get('schema_version') in ('4', '5', '6'):
             decisions = self.rows('''SELECT d.enabled,d.reason,d.profile_id,p.status,p.options_json,p.metrics_json
                 FROM trace_selection_decisions d JOIN trace_selection_profiles p ON p.id=d.profile_id
                 WHERE d.legacy_id=?''', (legacy_id,))
@@ -73,10 +74,45 @@ class BlockContextReader:
                 selection['enabled'] = bool(selection['enabled'])
                 selection['options'] = json.loads(selection.pop('options_json'))
                 selection['metrics'] = json.loads(selection.pop('metrics_json'))
+        interest = self.rows('SELECT rule,detail FROM trace_interest_evidence WHERE legacy_id=? ORDER BY rule,detail LIMIT 51', (legacy_id,)) if self.manifest.get('schema_version') in ('5','6') else []
+        application = self.rows('''SELECT o.*,l.node_id,l.position,l.edge_id FROM application_observations o
+            JOIN application_probe_bindings b ON b.observation_id=o.id LEFT JOIN application_locations l ON l.observation_id=o.id
+            WHERE b.legacy_id=? ORDER BY o.variant_id,o.id LIMIT 1001''', (legacy_id,)) if self.manifest.get('schema_version') == '6' else []
+        for method_id in dict.fromkeys(o['method_id'] for o in application):
+            if not any(m['id'] == method_id for m in methods):
+                methods += self.rows('SELECT * FROM methods WHERE id=?', (method_id,))
+        application_selected = []
+        if self.manifest.get('schema_version') == '6':
+            application_selected=self.rows('''SELECT DISTINCT v.id,v.name,v.path FROM application_probe_bindings b
+                JOIN application_observations o ON o.id=b.observation_id JOIN project_variants v ON v.id=o.variant_id
+                WHERE b.legacy_id=? ORDER BY v.id''',(legacy_id,))
+            for row in self.rows('SELECT method_id FROM application_probe_contexts WHERE legacy_id=?',(legacy_id,)):
+                if not any(m['id']==row['method_id'] for m in methods):
+                    methods += self.rows('SELECT * FROM methods WHERE id=?',(row['method_id'],))
         return {'manifest': self.manifest, 'legacy': legacy[0], 'mapping': links, 'methods': methods,
+                'interest_evidence': interest[:50], 'interest_evidence_has_more': len(interest) > 50,
+                'application_observations': application[:1000], 'application_has_more': len(application)>1000,
+                'application_selected_by': application_selected,
                 'trace_enabled': bool(legacy[0].get('to_trace', 1)), 'trace_selection': selection,
                 'selected_by': selected, 'compiled_by_without_selection': unselected,
                 'diagnostics': self.rows('SELECT * FROM analysis_diagnostics WHERE scope=?', ('legacy:' + str(legacy_id),))}
+
+    def get_application_entries(self, limit=1000, offset=0, classification=None):
+        self._page(limit, offset)
+        if self.manifest.get('schema_version') != '6':
+            raise ValueError('Application entries require schema 6; regenerate')
+        if classification not in (None, 'observed', 'technical', 'opaque', 'unclassified'):
+            raise ValueError('Invalid application entry classification')
+        entries = self.rows('''SELECT e.*,m.signature,d.path,v.name AS project_name,m.variant_id
+            FROM application_entries e JOIN methods m ON m.id=e.method_id
+            JOIN documents d ON d.id=m.document_id JOIN project_variants v ON v.id=m.variant_id
+            WHERE (? IS NULL OR e.classification=?) ORDER BY e.method_id LIMIT ? OFFSET ?''',
+            (classification, classification, limit+1, offset))
+        return {'entries': entries[:limit], 'next_offset': offset+limit if len(entries)>limit else None}
+
+    def decode_log(self, log, build_manifest, **limits):
+        from application_decoder import ApplicationDecoder
+        return ApplicationDecoder(self, build_manifest, **limits).decode(log)
 
     def get_local_flow(self, method_id, limit=1000, offset=0):
         self._page(limit, offset)
@@ -242,6 +278,20 @@ class BlockContextReader:
 
 
 def main():
+    if len(sys.argv)>1 and sys.argv[1]=='decode-log':
+        from application_decoder import ApplicationDecoder
+        parser=argparse.ArgumentParser(description='Decode application observations with bounded source-model search')
+        parser.add_argument('database');parser.add_argument('log');parser.add_argument('--build-manifest',required=True)
+        parser.add_argument('--max-states',type=int,default=100000);parser.add_argument('--max-depth',type=int,default=32)
+        parser.add_argument('--max-candidates',type=int,default=8);parser.add_argument('--max-memory-mb',type=int,default=128)
+        args=parser.parse_args(sys.argv[2:]);reader=BlockContextReader(args.database)
+        try:
+            decoder=ApplicationDecoder(reader,args.build_manifest,args.max_states,args.max_depth,args.max_candidates,args.max_memory_mb)
+            for item in decoder.decode(args.log):
+                print(json.dumps(item,ensure_ascii=False))
+        finally:
+            reader.close()
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('database')
     parser.add_argument('block_id', type=int)

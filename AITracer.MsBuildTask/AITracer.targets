@@ -18,6 +18,7 @@
         DatabasePath="$(AITracerDbPath)" 
         IntermediateOutputPath="$(IntermediateOutputPath)">
       <Output TaskParameter="ModifiedCompile" ItemName="AITracerModifiedCompile" />
+      <Output TaskParameter="ProfileManifest" PropertyName="AITracerProfileManifest" />
     </InjectTracesTask>
 
     <!-- Replace the original Compile items with the modified ones -->
@@ -25,6 +26,10 @@
       <Compile Remove="@(Compile)" />
       <Compile Include="@(AITracerModifiedCompile)" />
     </ItemGroup>
+  </Target>
+
+  <Target Name="AITracerCopyProfile" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(AITracerProfileManifest)' != '' and Exists('$(AITracerProfileManifest)')">
+    <Copy SourceFiles="$(AITracerProfileManifest)" DestinationFiles="$(TargetDir)$(TargetFileName).aitracer.json" />
   </Target>
 
 </Project>

@@ -49,14 +49,19 @@ internal class Program
             extracted.Inputs.Verify(cancellation.Token);
             Progress("selection_apply");
             string profile=TraceSelectionStore.Apply(staging.Path,options.Selection,selection,cancellation.Token);
+            selection.Application?.Inputs.Verify(cancellation.Token);
             extracted.Counts["trace_selection_profiles"]=1;extracted.Counts["trace_selection_decisions"]=selection.ProbeCount;extracted.Counts["trace_selection_roots"]=selection.Roots.Count;
+            extracted.Counts["trace_interest_evidence"]=selection.Interest?.Evidence.Distinct().LongCount()??0;
             Progress("verify_final_catalog");
             extracted.Inputs.Verify(cancellation.Token);TraceSelectionStore.VerifyIntegrity(staging.Path);
+            TraceSelectionStore.WriteApplicationReport(options.Output,selection);
             cancellation.Token.ThrowIfCancellationRequested();Progress("publish_catalog");clock.Restart();
             string destination=Path.Combine(options.Output,"basic_blocks.sqlite");CatalogPublication.Publish(staging.Path,destination);
             timings["publication_ms"]=clock.Elapsed.TotalMilliseconds;logger.Save();
             using var resultDb=new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder {DataSource=destination,Mode=Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,Pooling=false}.ToString());
             resultDb.Open();using var query=resultDb.CreateCommand();query.CommandText="SELECT value FROM analysis_manifest WHERE key='coverage'";string coverage=(string)query.ExecuteScalar()!;
+            query.CommandText="SELECT value FROM analysis_manifest WHERE key='counts'";
+            foreach(var count in JsonSerializer.Deserialize<Dictionary<string,long>>((string)query.ExecuteScalar()!)!)extracted.Counts[count.Key]=count.Value;
             string summary=JsonSerializer.Serialize(new {state="published",coverage,projects=extracted.Projects,counts=extracted.Counts,timings_ms=timings,total_ms=total.Elapsed.TotalMilliseconds,
                 selection_profile_id=profile,selection=selection.Summary,
                 database_bytes=new FileInfo(destination).Length,peak_working_set_bytes=Process.GetCurrentProcess().PeakWorkingSet64,database=destination,log=logger.FilePath});
@@ -75,6 +80,7 @@ internal class Program
         workspace.LoadMetadataForReferencedProjects=false;
         var errors=new List<string>();workspace.WorkspaceFailed+=(_,e)=>errors.Add(e.Diagnostic.Message);
         var inputs=new InputRegistry();inputs.Track(options.Solution);
+        if(options.Selection.Enabled&&options.Selection.Mode=="application")inputs.Track(options.Selection.ObservationPolicy);
         Progress("open_solution");var clock=Stopwatch.StartNew();
         var solution=await workspace.OpenSolutionAsync(options.Solution,cancellationToken:token);
         timings["load_ms"]=clock.Elapsed.TotalMilliseconds;

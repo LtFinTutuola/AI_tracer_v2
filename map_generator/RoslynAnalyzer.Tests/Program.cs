@@ -10,6 +10,7 @@ using RoslynAnalyzer;
 
 // No target solution load, Program.Main invocation or Graphify execution.
 if(args.FirstOrDefault()=="--select-words") {TraceSelectionTests.SelectWords(args[1],args[2]);return;}
+if(args.FirstOrDefault()=="--application-source-preview") {Environment.ExitCode=await ApplicationSourcePreview.Run(args);return;}
 if(args.FirstOrDefault()=="--probe-shared-cfg") {Environment.ExitCode=await SharedCfgProbe.RunAsync(args);return;}
 if(args.FirstOrDefault()?.StartsWith("--compare-shared")==true) {Environment.ExitCode=await SharedSourceComparator.RunAsync(args);return;}
 var export=args.Length==2 && args[0]=="--export"?Path.GetFullPath(args[1]):null;
@@ -243,9 +244,15 @@ using(var catalog=new ContextCatalog(Path.Combine(directory,Guid.NewGuid()+".sql
     try {await catalog.AnalyzeDocument(document,catalog.AddProject(document.Project),token:cancelled);throw new Exception("Cancellation ignored");}catch(OperationCanceledException){assertions++;}
 }
 await TraceSelectionTests.Run(directory,references,Assert);
+await InterestFilterTests.Run(directory,references,Assert);
 using(var resourcesTest=new TraceSelectionModel(unionForward,new SelectionResources(new TraceSelectionOptions(),CancellationToken.None),512)) {
     resourcesTest.Load();
     Assert(resourcesTest.Protected.Values.Count(reason=>reason=="variant_without_selection")==2,"Shared union-exclusive IDs are protected before selection");
+}
+{
+    var limits=new TraceSelectionOptions();var resources=new SelectionResources(limits,CancellationToken.None){PhaseFraction=1};
+    var interest=ApplicationInterestFilter.Select(unionForward,limits,new HashSet<long>(),resources.Check,resources.Reserve,resources.Release);
+    Assert(interest.Enabled.Count==16,"Second filter preserves shared-variant integrity even when count target is lower");
 }
 string published=Path.Combine(directory,"published.sqlite");File.Copy(path,published,true);
 string bad=Path.Combine(directory,"bad.sqlite");File.WriteAllText(bad,"invalid");Throws<SqliteException>(()=>CatalogPublication.Publish(bad,published),"Invalid catalog published");
@@ -268,7 +275,9 @@ foreach(int size in new[]{100,200,400}) {
     using(var db=new SqliteConnection($"Data Source={benchPath};Pooling=False")){db.Open();using var cmd=db.CreateCommand();cmd.CommandText="SELECT (SELECT count(*) FROM flow_nodes)+(SELECT count(*) FROM flow_points)+(SELECT count(*) FROM flow_edges)+(SELECT count(*) FROM call_sites)+(SELECT count(*) FROM call_targets)";rows=Convert.ToInt64(cmd.ExecuteScalar());}
     clock.Restart();var selection=TraceSelectionEngine.Select(benchPath,new TraceSelectionOptions {SamplesPerRoot=64,MaxDurationSeconds=30});
     var selectionMs=clock.Elapsed.TotalMilliseconds;
-    Assert(selection.Status!="fallback"&&selection.PeakBufferBytes<=512L*1024*1024,"Growing cyclic fixture stays inside selection limits");
+    Assert(selection.PeakBufferBytes<=512L*1024*1024,"Growing cyclic fixture stays inside selection memory limit");
+    Assert(selection.Status!="fallback"||selection.FallbackReason=="no_qualified_contexts"&&selection.Disabled.Count==0&&selection.Roots.All(root=>root.Status!="qualified"),
+        "Cyclic fixture may retain baseline when no root qualifies; other fallbacks fail the benchmark");
     benchmarks.Add(new {methods=size,legacy_ms=legacyMs,context_ms=fullMs,graphs,legacy_probes=baseline.Count,graph_rows=rows,database_bytes=new FileInfo(benchPath).Length,
         selection_ms=selectionMs,selection_disabled=selection.Disabled.Count,selection_roots=selection.Roots.Count,selection_peak_buffer_bytes=selection.PeakBufferBytes,
         selection_fit=selection.Summary});
@@ -276,6 +285,7 @@ foreach(int size in new[]{100,200,400}) {
     if(previousRows!=0)Assert(rows==previousRows*2,"Doubling fixture doubles graph rows");
     previousRows=rows;
 }
+await ApplicationTests.Run(directory,references,Assert);
 var report=JsonSerializer.Serialize(new {assertions,benchmarks,peak_working_set_bytes=Process.GetCurrentProcess().PeakWorkingSet64},new JsonSerializerOptions {WriteIndented=true});
 File.WriteAllText(Path.Combine(directory,"benchmark.json"),report);Console.WriteLine(report);
 if(export==null)Directory.Delete(directory,true);

@@ -5,11 +5,10 @@ configuration: "Debug"
 platform: "AnyCPU"
 trace_selection:
   enabled: true
-  # Fraction on training/calibration, not a runtime accuracy guarantee.
-  ambiguity_budget: 0.01
-  max_call_depth: 4
-  max_candidates: 8
-  samples_per_root: 512
+  mode: application
+  observation_policy: profiles/droidpos.application.json
+  # Preserve declared application observations; technical detail may be silent.
+  ambiguity_budget: 0
   max_duration_seconds: 600
   max_memory_mb: 512
   seed: 1729

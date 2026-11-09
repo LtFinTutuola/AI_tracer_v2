@@ -11,10 +11,10 @@ using Microsoft.Data.Sqlite;
 
 namespace RoslynAnalyzer;
 
-/// <summary>Schema 4: local structure, shared-source probe union and event selection.</summary>
-public sealed class ContextCatalog : IDisposable
+/// <summary>Schema 6: compact local flow, shared probes and application observation facts.</summary>
+public sealed partial class ContextCatalog : IDisposable
 {
-    public const int SchemaVersion=4;
+    public const int SchemaVersion=6;
     private readonly SqliteConnection db;
     private SqliteTransaction? tx;
     private readonly Dictionary<string,SqliteCommand> commands=new();
@@ -80,6 +80,7 @@ public sealed class ContextCatalog : IDisposable
           CREATE INDEX diagnostics_scope ON analysis_diagnostics(scope);
           """);
         Run(TraceSelectionStore.Schema);
+        Run(ApplicationSchema);
         Batch(()=> {Meta("schema_version",SchemaVersion.ToString()); Meta("state","in_progress"); Meta("framework",framework); Meta("configuration",configuration);
             Meta("model","source_explicit_cfg_declared_calls"); Meta("input_scope","known_workspace_inputs; additions not exhaustively detected");});
     }
@@ -103,7 +104,9 @@ public sealed class ContextCatalog : IDisposable
     public void Batch(Action action) {
         if(tx!=null) {action();return;}
         long begin=Stopwatch.GetTimestamp();using var batch=db.BeginTransaction(); tx=batch;WriteTicks+=Stopwatch.GetTimestamp()-begin;
-        try {action();long commit=Stopwatch.GetTimestamp();batch.Commit();WriteTicks+=Stopwatch.GetTimestamp()-commit;} finally {tx=null;}
+        try {action();long commit=Stopwatch.GetTimestamp();batch.Commit();WriteTicks+=Stopwatch.GetTimestamp()-commit;}
+        catch {applicationSymbolCache.Clear();throw;}
+        finally {tx=null;}
     }
     public void Meta(string key,string value)=>Run("INSERT INTO analysis_manifest VALUES(@p0,@p1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",key,value);
     public void Diagnostic(string scope,string code,string message) {
@@ -138,7 +141,7 @@ public sealed class ContextCatalog : IDisposable
                 foreach(var name in new[]{"Directory.Build.props","Directory.Build.targets","Directory.Packages.props","global.json","NuGet.Config"}) Inputs.Track(Path.Combine(dir.FullName,name));
         return result;
     }
-    private sealed record Body(long Id,SyntaxNode Syntax,ControlFlowGraph? Graph,List<TraceableBlock> Probes);
+    private sealed record Body(long Id,SyntaxNode Syntax,ControlFlowGraph? Graph,List<TraceableBlock> Probes,IMethodSymbol? Symbol);
     private sealed record Event(string Kind,int Start,int Length,IMethodSymbol? Target=null,string? Resolution=null,TraceableBlock? Probe=null,string Mapping="exact_point");
 
     public async Task<IReadOnlyList<TraceableBlock>> AnalyzeDocument(Document document,long variant,bool generated=false,CancellationToken token=default)
@@ -217,12 +220,13 @@ public sealed class ContextCatalog : IDisposable
                 // The legacy selector only visits BaseMethodDeclarationSyntax.
                 if(body.Syntax is BaseMethodDeclarationSyntax method) body.Probes.AddRange(probes.Where(p=>p.ScopeStartLine==method.GetLocation().GetLineSpan().StartLinePosition.Line+1 && p.InjectionOffset>=method.SpanStart && p.InjectionOffset<method.Span.End));
                 if(body.Graph!=null) SaveGraph(body,legacyIds,token);
+                RecordApplicationBody(body,model,generated,token);
             }
 
             void AddBody(SyntaxNode syntax,IMethodSymbol? symbol,ControlFlowGraph? cfg,long? parent,string status) {
                 string key=symbol==null?path+":"+syntax.SpanStart:SymbolKey(symbol);
                 long id=Insert("INSERT INTO methods(stable_key,symbol_key,variant_id,document_id,parent_id,signature,start,length,status) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8) RETURNING id",Id(variantKeys[variant],path,key,syntax.SpanStart),key,variant,doc,parent,symbol?.ToDisplayString()??"<top-level>",syntax.SpanStart,syntax.Span.Length,status);
-                bodies.Add(new(id,syntax,cfg,new()));
+                bodies.Add(new(id,syntax,cfg,new(),symbol));
                 if(cfg==null)return;
                 foreach(var local in cfg.LocalFunctions) {
                     CfgRequests++;var nested=cfg.GetLocalFunctionControlFlowGraph(local,token); GraphsCreated++; AddBody(nested.OriginalOperation.Syntax,local,nested,id,"analyzed");
@@ -252,6 +256,27 @@ public sealed class ContextCatalog : IDisposable
     private void SaveGraph(Body body,Dictionary<int,long> legacyIds,CancellationToken token)
     {
         var cfg=body.Graph!; var nodes=new Dictionary<int,long>();
+        // Return expressions are evaluated in the CFG branch value. The source
+        // probe precedes that evaluation; map only an exact expression root.
+        foreach(var probe in body.Probes.Where(p=>p.CfgOrdinal==null)) {
+            var jump=body.Syntax.FindToken(probe.InjectionOffset).Parent?.AncestorsAndSelf().OfType<ReturnStatementSyntax>().FirstOrDefault();
+            if(jump?.Expression!=null) {
+                var matches=cfg.Blocks.Where(b=>b.BranchValue is not IFlowCaptureReferenceOperation&&b.BranchValue?.Syntax.Span==jump.Expression.Span).ToArray();
+                if(matches.Length==1)probe.CfgOrdinal=matches[0].Ordinal;
+            }
+            var statement=body.Syntax.FindToken(probe.InjectionOffset).Parent?.AncestorsAndSelf().OfType<StatementSyntax>().FirstOrDefault();
+            if(probe.CfgOrdinal!=null||statement is not (ReturnStatementSyntax {Expression:null} or ContinueStatementSyntax or BreakStatementSyntax))continue;
+            if(statement.Parent is BlockSyntax parent) {
+                int index=parent.Statements.IndexOf(statement);
+                if(index>0&&parent.Statements[index-1] is ExpressionStatementSyntax or LocalDeclarationStatementSyntax) {
+                    var previous=parent.Statements[index-1];
+                    var matches=cfg.Blocks.Where(b=>b.BranchValue==null&&b.ConditionalSuccessor?.Destination==null&&b.FallThroughSuccessor?.Destination!=null&&
+                        b.Operations.LastOrDefault()?.Syntax.AncestorsAndSelf().Contains(previous)==true).ToArray();
+                    if(matches.Length==1)probe.CfgOrdinal=matches[0].Ordinal;
+                } else if(parent==((body.Syntax as BaseMethodDeclarationSyntax)?.Body)&&parent.Statements.Count==1&&cfg.Blocks.Length==2&&statement is ReturnStatementSyntax)
+                    probe.CfgOrdinal=cfg.Blocks[0].Ordinal;
+            }
+        }
         var regions=new Stack<ControlFlowRegion>();regions.Push(cfg.Root);
         bool exceptional=false;
         while(regions.TryPop(out var region)) {
@@ -265,7 +290,14 @@ public sealed class ContextCatalog : IDisposable
         foreach(var b in cfg.Blocks) {
             token.ThrowIfCancellationRequested();
             var events=new List<Event>(); var operations=b.Operations.Concat(b.BranchValue==null?Array.Empty<IOperation>():new[]{b.BranchValue}).ToArray();
-            foreach(var op in operations) Visit(op);
+            foreach(var op in b.Operations) {
+                events.Add(new("source_before",op.Syntax.SpanStart,0));Visit(op);
+                events.Add(new("source_after",op.Syntax.Span.End,0));
+            }
+            if(b.BranchValue!=null) {
+                events.Add(new("source_before",b.BranchValue.Syntax.SpanStart,0));Visit(b.BranchValue);
+                events.Add(new("control",b.BranchValue.Syntax.SpanStart,b.BranchValue.Syntax.Span.Length));
+            }
             foreach(var probe in body.Probes.Where(p=>p.CfgOrdinal==b.Ordinal)) {
                 int index=events.FindIndex(e=>e.Start>=probe.InjectionOffset || (e.Start<=probe.InjectionOffset && e.Start+e.Length>probe.InjectionOffset));
                 if(index<0) index=events.Count;
@@ -289,18 +321,21 @@ public sealed class ContextCatalog : IDisposable
                 long? destination=branch.Destination==null?null:nodes[branch.Destination.Ordinal];
                 // A pure guard return may be represented by an edge straight to Exit,
                 // rather than an operation. Split only when syntax proves the exact arm.
-                if(branch.Destination?.Kind==BasicBlockKind.Exit && b.BranchValue!=null && alternative!="unconditional")
+                if(branch.Destination!=null && b.BranchValue!=null && alternative!="unconditional")
                     foreach(var probe in body.Probes.Where(p=>p.CfgOrdinal==null)) {
-                        var jump=body.Syntax.FindToken(probe.InjectionOffset).Parent?.AncestorsAndSelf().OfType<ReturnStatementSyntax>().FirstOrDefault();
+                        var jump=body.Syntax.FindToken(probe.InjectionOffset).Parent?.AncestorsAndSelf().OfType<StatementSyntax>().FirstOrDefault();
                         var guard=jump?.Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
-                        if(jump?.Expression!=null || jump==null || guard==null || guard.Condition.Span!=b.BranchValue.Syntax.Span)continue;
+                        if(jump is not (ReturnStatementSyntax {Expression:null} or BreakStatementSyntax or ContinueStatementSyntax)||guard==null||guard.Condition.Span!=b.BranchValue.Syntax.Span)continue;
+                        if(jump is ReturnStatementSyntax&&branch.Destination.Kind!=BasicBlockKind.Exit)continue;
+                        if(jump is ContinueStatementSyntax&&!jump.Ancestors().Any(n=>n is ForStatementSyntax or WhileStatementSyntax or DoStatementSyntax or CommonForEachStatementSyntax))continue;
+                        if(jump is BreakStatementSyntax&&!jump.Ancestors().Any(n=>n is ForStatementSyntax or WhileStatementSyntax or DoStatementSyntax or CommonForEachStatementSyntax or SwitchStatementSyntax))continue;
                         StatementSyntax? arm=alternative=="true"?guard.Statement:guard.Else?.Statement;
                         if(arm is BlockSyntax block && block.Statements.Count==1)arm=block.Statements[0];
                         if(arm!=jump)continue;
                         long bridge=Insert("INSERT INTO flow_nodes(method_id,ordinal,kind,reachable,region) VALUES(@p0,@p1,'Block',@p2,@p3) RETURNING id",body.Id,extraOrdinal++,b.IsReachable?1:0,Region(b.EnclosingRegion));
                         long point=Insert("INSERT INTO flow_points(node_id,position,kind,start,length) VALUES(@p0,0,'legacy',@p1,0) RETURNING id",bridge,probe.InjectionOffset);
                         Run("INSERT INTO legacy_block_links(legacy_id,method_id,point_id,mapping_kind) VALUES(@p0,@p1,@p2,'exact_point')",legacyIds[probe.InjectionOffset],body.Id,point);
-                        Run("INSERT INTO flow_edges(source_id,target_id,alternative,semantics,regions,status) VALUES(@p0,@p1,'unconditional','Return','{}','modeled')",bridge,destination);
+                        Run("INSERT INTO flow_edges(source_id,target_id,alternative,semantics,regions,status) VALUES(@p0,@p1,'unconditional',@p2,'{}',@p3)",bridge,destination,jump is ReturnStatementSyntax?"Return":jump is ContinueStatementSyntax?"Continue":"Break",unsupported?"incomplete":"modeled");
                         destination=bridge;mapped.Add(probe);
                     }
                 Run("INSERT INTO flow_edges(source_id,target_id,alternative,semantics,regions,status) VALUES(@p0,@p1,@p2,@p3,@p4,@p5)",nodes[b.Ordinal],destination,alternative,branch.Semantics.ToString(),JsonSerializer.Serialize(new {Leaving=branch.LeavingRegions.Select(Region),Entering=branch.EnteringRegions.Select(Region),Finally=branch.FinallyRegions.Select(Region)}),unsupported?"incomplete":"modeled");
@@ -398,7 +433,7 @@ public sealed class ContextCatalog : IDisposable
             if(Convert.ToInt64(cmd.ExecuteScalar())!=0)throw new InvalidOperationException("Invalid call, probe or method boundary");
             token.ThrowIfCancellationRequested();
             cmd.CommandText="SELECT count(*) FROM analysis_diagnostics";DiagnosticCount=Convert.ToInt32(cmd.ExecuteScalar());
-            foreach(var table in new[]{"project_variants","documents","methods","basic_blocks","flow_nodes","flow_points","flow_edges","call_sites","call_targets","legacy_block_links","legacy_probe_variants","shared_projection_stats","analysis_diagnostics"}) {
+            foreach(var table in new[]{"project_variants","documents","methods","basic_blocks","flow_nodes","flow_points","flow_edges","call_sites","call_targets","legacy_block_links","legacy_probe_variants","shared_projection_stats","analysis_diagnostics","application_symbols","application_method_facts","application_facts","application_registrations"}) {
                 cmd.CommandText="SELECT count(*) FROM "+table;Counts[table]=Convert.ToInt64(cmd.ExecuteScalar());
             }
             Meta("input_manifest",Inputs.Manifest());Meta("fingerprint",Id(Inputs.Manifest()));
