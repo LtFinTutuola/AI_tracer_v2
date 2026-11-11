@@ -13,12 +13,18 @@ public sealed partial class ContextCatalog
       CREATE TABLE application_method_facts(method_id INTEGER PRIMARY KEY REFERENCES methods(id),symbol_key TEXT REFERENCES application_symbols(key),body_start INTEGER,body_end INTEGER,expression_start INTEGER,expression_end INTEGER,return_prefix TEXT,exported INTEGER,entry_kind TEXT,is_async INTEGER,is_iterator INTEGER,exit_semantics TEXT,supported INTEGER);
       CREATE TABLE application_facts(id INTEGER PRIMARY KEY,stable_key TEXT UNIQUE,method_id INTEGER REFERENCES methods(id),kind TEXT,symbol_key TEXT,anchor INTEGER,edit_offset INTEGER,span_start INTEGER,span_end INTEGER,repeated INTEGER,payload TEXT);
       CREATE INDEX app_facts_method ON application_facts(method_id);
+      CREATE TABLE application_fact_mappings(fact_id INTEGER PRIMARY KEY REFERENCES application_facts(id),status TEXT NOT NULL,reason TEXT NOT NULL);
+      CREATE TABLE application_fact_locations(id INTEGER PRIMARY KEY,fact_id INTEGER REFERENCES application_facts(id),node_id INTEGER REFERENCES flow_nodes(id),position INTEGER,edge_id INTEGER REFERENCES flow_edges(id),phase TEXT NOT NULL);
+      CREATE INDEX app_fact_locations_fact ON application_fact_locations(fact_id);
+      CREATE INDEX app_fact_locations_node ON application_fact_locations(node_id,position);
       CREATE TABLE application_registrations(method_id INTEGER REFERENCES methods(id),target_key TEXT,api_key TEXT,kind TEXT,PRIMARY KEY(method_id,target_key,api_key));
       CREATE INDEX app_reg_target ON application_registrations(target_key);
       CREATE TABLE application_entries(method_id INTEGER PRIMARY KEY REFERENCES methods(id),classification TEXT,reasons TEXT);
-      CREATE TABLE application_observations(id TEXT PRIMARY KEY,method_id INTEGER REFERENCES methods(id),variant_id INTEGER REFERENCES project_variants(id),kind TEXT,evidence TEXT,point_id INTEGER REFERENCES flow_points(id),status TEXT);
+      CREATE TABLE application_observations(id TEXT PRIMARY KEY,method_id INTEGER REFERENCES methods(id),variant_id INTEGER REFERENCES project_variants(id),kind TEXT,evidence TEXT,point_id INTEGER REFERENCES flow_points(id),status TEXT,mapping_status TEXT NOT NULL,mapping_reason TEXT NOT NULL);
       CREATE INDEX app_obs_method ON application_observations(method_id);
-      CREATE TABLE application_locations(observation_id TEXT PRIMARY KEY REFERENCES application_observations(id),node_id INTEGER REFERENCES flow_nodes(id),position INTEGER,edge_id INTEGER REFERENCES flow_edges(id));
+      CREATE TABLE application_locations(id INTEGER PRIMARY KEY,observation_id TEXT REFERENCES application_observations(id),node_id INTEGER REFERENCES flow_nodes(id),position INTEGER,edge_id INTEGER REFERENCES flow_edges(id));
+      CREATE UNIQUE INDEX app_locations_unique ON application_locations(observation_id,node_id,position,coalesce(edge_id,-1));
+      CREATE INDEX app_locations_observation ON application_locations(observation_id);
       CREATE INDEX app_locations_node ON application_locations(node_id,position);
       CREATE TABLE application_probe_bindings(observation_id TEXT REFERENCES application_observations(id),legacy_id INTEGER REFERENCES basic_blocks(id),PRIMARY KEY(observation_id,legacy_id));
       CREATE INDEX app_bind_probe ON application_probe_bindings(legacy_id);
@@ -41,6 +47,7 @@ public sealed partial class ContextCatalog
     private void RecordApplicationBody(Body body,SemanticModel model,bool generated,CancellationToken token)
     {
         if(body.Symbol==null)return;
+        var mapping=new ApplicationFactMapper(db,tx,body.Id,body.Graph,model,token);
         string symbol=RecordSymbol(body.Symbol);
         var nodes=body.Syntax.DescendantNodesAndSelf(n=>n==body.Syntax||n is not (LocalFunctionStatementSyntax or AnonymousFunctionExpressionSyntax)).ToArray();
         BlockSyntax? block=body.Syntax switch {BaseMethodDeclarationSyntax m=>m.Body,AccessorDeclarationSyntax a=>a.Body,LocalFunctionStatementSyntax f=>f.Body,AnonymousFunctionExpressionSyntax a=>a.Body as BlockSyntax,BlockSyntax b=>b,_=>null};
@@ -63,8 +70,9 @@ public sealed partial class ContextCatalog
         bool Repeated(SyntaxNode n)=>n.Ancestors().TakeWhile(a=>a!=body.Syntax).Any(a=>a is ForStatementSyntax or ForEachStatementSyntax or ForEachVariableStatementSyntax or WhileStatementSyntax or DoStatementSyntax);
         void Fact(string kind,SyntaxNode syntax,int anchor,int edit,ISymbol? target,object payload,int? start=null,int? end=null) {
             token.ThrowIfCancellationRequested();string key=target==null?"":RecordSymbol(target);
-            Run("INSERT OR IGNORE INTO application_facts(stable_key,method_id,kind,symbol_key,anchor,edit_offset,span_start,span_end,repeated,payload) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9)",
+            long fact=Insert("INSERT INTO application_facts(stable_key,method_id,kind,symbol_key,anchor,edit_offset,span_start,span_end,repeated,payload) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9) ON CONFLICT(stable_key) DO UPDATE SET payload=excluded.payload RETURNING id",
                 Id(body.Id,kind,anchor,key),body.Id,kind,key,anchor,edit,start??syntax.SpanStart,end??syntax.Span.End,Repeated(syntax)?1:0,JsonSerializer.Serialize(payload));
+            mapping.Save(fact,kind,syntax,JsonSerializer.SerializeToElement(payload));
         }
         var localInputs=new Dictionary<ISymbol,List<ExpressionSyntax>>(SymbolEqualityComparer.Default);
         void LocalInput(ISymbol? local,ExpressionSyntax value) {if(local is not ILocalSymbol)return;if(!localInputs.TryGetValue(local,out var inputs))localInputs[local]=inputs=new();inputs.Add(value);}

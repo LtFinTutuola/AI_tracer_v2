@@ -10,6 +10,11 @@ using RoslynAnalyzer;
 
 // No target solution load, Program.Main invocation or Graphify execution.
 if(args.FirstOrDefault()=="--select-words") {TraceSelectionTests.SelectWords(args[1],args[2]);return;}
+if(args.FirstOrDefault()=="--static-only") {
+    var output=Path.GetFullPath(args.Length>1?args[1]:Path.Combine("scratch","static-tests-"+Guid.NewGuid().ToString("N")));
+    var refs=((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator).Select(p=>(MetadataReference)MetadataReference.CreateFromFile(p)).ToArray();
+    int count=0;await StaticFlowTests.Run(output,refs,(valid,message)=>{count++;if(!valid)throw new Exception(message);});Console.WriteLine($"Static assertions: {count}");return;
+}
 if(args.FirstOrDefault()=="--application-source-preview") {Environment.ExitCode=await ApplicationSourcePreview.Run(args);return;}
 if(args.FirstOrDefault()=="--probe-shared-cfg") {Environment.ExitCode=await SharedCfgProbe.RunAsync(args);return;}
 if(args.FirstOrDefault()?.StartsWith("--compare-shared")==true) {Environment.ExitCode=await SharedSourceComparator.RunAsync(args);return;}
@@ -286,6 +291,7 @@ foreach(int size in new[]{100,200,400}) {
     previousRows=rows;
 }
 await ApplicationTests.Run(directory,references,Assert);
+await StaticFlowTests.Run(directory,references,Assert);
 var report=JsonSerializer.Serialize(new {assertions,benchmarks,peak_working_set_bytes=Process.GetCurrentProcess().PeakWorkingSet64},new JsonSerializerOptions {WriteIndented=true});
 File.WriteAllText(Path.Combine(directory,"benchmark.json"),report);Console.WriteLine(report);
 if(export==null)Directory.Delete(directory,true);

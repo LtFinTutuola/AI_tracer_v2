@@ -23,6 +23,7 @@ internal static class ApplicationTests
         }
         public class BaseFixture { public int BaseValue; public BaseFixture(int value) { BaseValue=value; } }
         public class Tracker : IDisposable { public void Dispose() { ApplicationFixture.Effects+=10; } }
+        public class KeyData { public bool Allowed; public bool IsAllowed(object owner,object transaction,out string errorMessage) { errorMessage="";return Allowed; } }
         public class ApplicationFixture : BaseFixture {
           public static int Effects; public int Status; public static event Action Tick;
           public ApplicationFixture() : base(3) { Status=0; }
@@ -36,6 +37,18 @@ internal static class ApplicationTests
             } finally { Effects+=100; }
           }
           public void Pay() { Effects++; }
+          public void BoundaryCaller(bool flag) { Console.WriteLine(flag ? First() : Second()); }
+          private int First() { Effects+=1;return 1; }
+          private int Second() { Effects+=2;return 2; }
+          public int BranchCases(bool login,bool cancel,bool allowed) {
+            int result=0;var key=new KeyData { Allowed=allowed };object CurrentTransaction=null;
+            if(!login && !cancel) result+=1;
+            if(login || cancel) result+=2;
+            if(!key.IsAllowed(this, CurrentTransaction, out var errorMessage)) result+=4;
+            if(!(login && cancel)) { } else { result+=8; }
+            if((login || cancel) && allowed) result+=16;
+            return result;
+          }
           public int Expression(int x) => x+1;
           public async Task<int> WorkAsync() { await Task.Yield(); return 7; }
           public Task<int> ReturnTask() => Task.FromResult(8);
@@ -54,6 +67,8 @@ internal static class ApplicationTests
         var policy=new {version=1,name="application-test",application_assemblies=new[]{"ApplicationFixture"},rules=new object[]{
             new {type="TechnicalHelpers",role="technical"},new {type="ApplicationFixture",member="Start",role="operation"},
             new {type="ApplicationFixture",member="Pay",role="operation"},new {type="ApplicationFixture",member="Expression",role="operation"},
+            new {type="ApplicationFixture",member="BranchCases",role="operation"},
+            new {type="System.Console",member="WriteLine",role="opaque"},
             new {type="ApplicationFixture",member="WorkAsync",role="operation"},new {type="ApplicationFixture",member="ReturnTask",role="operation"},
             new {type="ApplicationFixture",member=".ctor",role="operation"},new {type="ApplicationFixture",member="RefStatus",role="operation"},
             new {type="BaseFixture",member=".ctor",role="operation"},
@@ -108,6 +123,15 @@ internal static class ApplicationTests
             assert(Convert.ToInt64(cmd.ExecuteScalar())>=2,"Guard break/continue probes use the actual CFG successor edges");
             cmd.CommandText="SELECT count(*) FROM legacy_probe_variants v JOIN basic_blocks b ON b.id=v.legacy_id WHERE b.reason LIKE 'Application observation:%'";
             assert(Convert.ToInt64(cmd.ExecuteScalar())==0,"Application bindings do not rewrite legacy selection provenance");
+            foreach(var regression in new[]{("!login && !cancel / false",2),("login || cancel / true",2),("!key.IsAllowed(this, CurrentTransaction, out var errorMessage) / false",1)}) {
+                cmd.CommandText="SELECT count(*) FROM application_locations l JOIN application_observations o ON o.id=l.observation_id JOIN methods m ON m.id=o.method_id WHERE m.signature LIKE '%BranchCases%' AND o.evidence=@label";
+                cmd.Parameters.Clear();cmd.Parameters.AddWithValue("@label",regression.Item1);
+                assert(Convert.ToInt64(cmd.ExecuteScalar())==regression.Item2,"Semantic frontier for production regression: "+regression.Item1);
+            }
+            cmd.Parameters.Clear();cmd.CommandText="SELECT count(*) FROM application_observations o JOIN methods m ON m.id=o.method_id WHERE m.signature LIKE '%BranchCases%' AND o.kind='decision' AND o.mapping_status<>'exact_frontier'";
+            assert(Convert.ToInt64(cmd.ExecuteScalar())==0,"Negation, nested short circuit and empty arms have demonstrated frontiers");
+            cmd.CommandText="SELECT count(*) FROM application_observations o JOIN methods m ON m.id=o.method_id JOIN application_locations l ON l.observation_id=o.id WHERE m.signature LIKE '%BoundaryCaller%' AND o.kind='operation_call' AND EXISTS(SELECT 1 FROM flow_points p WHERE p.node_id=l.node_id AND p.kind='control' AND p.position>l.position)";
+            assert(Convert.ToInt64(cmd.ExecuteScalar())==1,"Call boundary precedes lowered conditional argument evaluation");
         }
         var engine=new Engine();var task=new AITracer.MsBuildTask.InjectTracesTask {BuildEngine=engine,DatabasePath=catalogPath,Compile=new ITaskItem[]{new TaskItem(path)},IntermediateOutputPath=Path.Combine(directory,"application-injection")};
         assert(task.Execute()&&engine.Errors.Count==0,"Application injection succeeds: "+string.Join(";",engine.Errors));
@@ -124,6 +148,12 @@ internal static class ApplicationTests
         var type=instrumented.GetType("ApplicationFixture")!;object instance=Activator.CreateInstance(type)!;
         IList events=(IList)instrumented.GetType("AITracer.Runtime.TraceContext")!.GetField("Events")!.GetValue(null)!;
         File.WriteAllLines(Path.Combine(directory,"application-constructors.log"),events.Cast<int>().Select(id=>$"2026-11-09T10:00:00Z||constructors||1||{id}"));
+        int branchIndex=0;
+        foreach(bool login in new[]{false,true})foreach(bool cancel in new[]{false,true})foreach(bool allowed in new[]{false,true}) {
+            events.Clear();int expected=(!login&&!cancel?1:0)+(login||cancel?2:0)+(!allowed?4:0)+(login&&cancel?8:0)+((login||cancel)&&allowed?16:0);
+            assert((int)type.GetMethod("BranchCases")!.Invoke(instance,new object[]{login,cancel,allowed})! ==expected,"Boolean frontier injection preserves results");
+            File.WriteAllLines(Path.Combine(directory,"application-branches-"+branchIndex+++".log"),events.Cast<int>().Select(id=>$"2026-11-09T10:00:00Z||branches||1||{id}"));
+        }
         int[] Run(int n,bool allowed,int choice,out int? result,out string? error) {
             events.Clear();result=null;error=null;try{result=(int)type.GetMethod("Start")!.Invoke(instance,new object[]{n,allowed,choice})!;}catch(TargetInvocationException ex){error=ex.InnerException!.Message;}
             return events.Cast<int>().ToArray();

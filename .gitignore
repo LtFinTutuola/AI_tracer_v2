@@ -14,3 +14,6 @@ map_generator/**/__pycache__/
 map_generator/__pycache__/
 map_generator/Injection.Tests/bin/
 map_generator/Injection.Tests/obj/
+map_generator/experiments/
+map_generator/profiles/
+.vscode/

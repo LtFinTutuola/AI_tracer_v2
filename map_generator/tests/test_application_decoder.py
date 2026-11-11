@@ -167,6 +167,94 @@ class ApplicationDecoderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'mismatch'):
             self.word([1, 2, 3, 4])
 
+    def test_later_events_prune_earlier_variant_hypotheses(self):
+        with self.connection() as c:
+            c.executescript('''INSERT INTO methods VALUES(3,'AlternativeA');
+              INSERT INTO application_method_facts VALUES(3,0);
+              INSERT INTO flow_nodes VALUES(70,3,'Entry'),(80,3,'Exit');
+              INSERT INTO flow_points VALUES(700,70,0,'entry'),(800,80,0,'exit');
+              INSERT INTO flow_edges VALUES(10,70,80,'modeled');
+              INSERT INTO application_observations VALUES('other-enter',3,1,'operation_enter','operation','modeled'),('other-leave',3,1,'operation_leave','body_left','modeled');
+              INSERT INTO application_locations VALUES('other-enter',70,0,NULL),('other-leave',80,0,NULL);
+              INSERT INTO application_probe_bindings VALUES('other-enter',1),('other-leave',4);''')
+        segment=self.word([1,2,3,4])[0]
+        self.assertEqual(segment['status'],'unique')
+        self.assertEqual([a['method_id'] for a in segment['observations'][0]['alternatives']],[1])
+        self.assertEqual([r['kind'] for r in segment['relations']],['call','local','return'])
+        self.assertTrue(all(r['evidence']=='cfg_witness' for r in segment['relations']))
+
+    def test_simultaneous_observations_are_not_alternatives(self):
+        with self.connection() as c:
+            c.executescript('''INSERT INTO application_observations VALUES('extra',1,1,'outcome','declared','modeled');
+              INSERT INTO application_locations VALUES('extra',30,0,NULL);
+              INSERT INTO application_probe_bindings VALUES('extra',4);''')
+        segment=self.word([1,2,3,4])[0]
+        self.assertEqual(segment['status'],'unique')
+        self.assertEqual(len(segment['observations'][-1]['alternatives']),1)
+        self.assertEqual(len(segment['observations'][-1]['alternatives'][0]['observations']),2)
+
+    def test_multiple_locations_for_same_observation(self):
+        with self.connection() as c:
+            c.executescript('''INSERT INTO flow_nodes VALUES(11,1,'Block');
+              INSERT INTO flow_points VALUES(110,11,0,'source_before');
+              INSERT INTO flow_edges VALUES(10,10,11,'modeled'),(11,11,20,'modeled');
+              INSERT INTO application_locations VALUES('a-enter',11,0,NULL);''')
+        segment=self.word([1,2,3,4])[0]
+        self.assertEqual(len(segment['observations'][0]['alternatives']),1)
+        self.assertEqual(len(segment['observations'][0]['alternatives'][0]['locations']),2)
+
+    def test_exploration_does_not_bypass_manifest_mismatch(self):
+        reader=BlockContextReader(self.db)
+        try:
+            self.assertEqual(ApplicationDecoder(reader,allow_unverified=True).binding_status,'unverified')
+            with self.assertRaisesRegex(ValueError,'manifest required'):
+                ApplicationDecoder(reader)
+            self.manifest.write_text(self.manifest.read_text().replace('profile','other'))
+            with self.assertRaisesRegex(ValueError,'mismatch'):
+                ApplicationDecoder(reader,self.manifest,allow_unverified=True)
+        finally: reader.close()
+
+    def test_malformed_log_preserves_events_without_joining_gap(self):
+        log=self.folder/'broken.log'
+        log.write_text('t||shared||1||1\ninvalid\nt||shared||1||4\n')
+        reader=BlockContextReader(self.db)
+        try:
+            result=list(ApplicationDecoder(reader,self.manifest).decode(log))
+            self.assertEqual([e['probe_id'] for r in result for e in r.get('observations',[])],[1,4])
+            self.assertTrue(any(r['kind']=='gap' for r in result))
+            self.assertTrue(all(r['status']!='unique' for r in result if r['kind']=='application_segment'))
+        finally:reader.close()
+
+    def test_memory_budget_retains_every_marker(self):
+        with self.connection() as c:c.execute('UPDATE application_observations SET evidence=?',('x'*400000,))
+        result=self.word([1,2,3,4],max_memory_mb=1)
+        self.assertTrue(any(r.get('status')=='budget_exceeded' for r in result))
+        self.assertEqual([e['probe_id'] for r in result for e in r.get('observations',[])],[1,2,3,4])
+
+    def test_silent_method_summary_does_not_hide_observed_call(self):
+        with self.connection() as c:
+            c.executescript('''ALTER TABLE flow_nodes ADD COLUMN reachable INTEGER DEFAULT 1;
+              CREATE TABLE application_method_summaries(method_id INTEGER,flags INTEGER,opaque INTEGER);
+              INSERT INTO application_method_summaries VALUES(1,1,0),(2,1,0),(3,0,0);
+              INSERT INTO methods VALUES(3,'SilentHelper');INSERT INTO flow_nodes(id,method_id,kind) VALUES(70,3,'Entry'),(80,3,'Exit');
+              INSERT INTO flow_points VALUES(700,70,0,'entry'),(800,80,0,'exit');
+              UPDATE flow_points SET kind='call' WHERE id=200;
+              INSERT INTO call_sites VALUES(2,1,200,'static',1);INSERT INTO call_targets VALUES(2,3);
+              INSERT INTO flow_edges VALUES(10,70,80,'modeled');''')
+        segment=self.word([1,2,3,4])[0]
+        self.assertEqual(segment['status'],'unique')
+        self.assertEqual(segment['relations'][0]['kind'],'call')
+        self.assertIn(3,segment['relations'][0]['silent_method_summaries'])
+        self.assertEqual(segment['technical_path_status'],'ambiguous')
+        self.assertEqual(next(o for o in segment['operations'] if o['method_id']==2)['parent_enter_event'],0)
+
+    def test_method_diagnostics_prevent_false_uniqueness(self):
+        with self.connection() as c:
+            c.executescript("ALTER TABLE methods ADD COLUMN document_id INTEGER DEFAULT 1;CREATE TABLE analysis_diagnostics(id INTEGER,scope TEXT,code TEXT);INSERT INTO analysis_diagnostics VALUES(1,'method:2','SEMANTIC_ERROR');")
+        segment=self.word([1,2,3,4])[0]
+        self.assertEqual(segment['status'],'incomplete')
+        self.assertIn('method_model_incomplete',segment['reasons'])
+
     def test_read_only_and_no_global_catalog_queries(self):
         reader = BlockContextReader(self.db)
         calls = []
@@ -193,6 +281,26 @@ class ApplicationDecoderTests(unittest.TestCase):
 
 
 class CompiledApplicationTests(unittest.TestCase):
+    def test_compiled_short_circuit_frontiers(self):
+        path=Path(os.environ.get('APPLICATION_FIXTURE',ROOT.parent/'artifacts/execution-map-v7'))
+        if not (path/'application-branches-0.log').exists():
+            self.skipTest('Export schema 7 .NET branch fixtures first')
+        reader=BlockContextReader(path/'application.sqlite')
+        try:
+            self.assertEqual(reader.manifest['schema_version'],'7')
+            for index in range(8):
+                result=list(reader.decode_log(path/f'application-branches-{index}.log',path/'application.profile.json'))
+                events=[e for r in result if r['kind']=='application_segment' for e in r['observations']]
+                self.assertFalse(any('source_observation_without_proven_cfg_chain' in r.get('reasons',[]) for r in result))
+                self.assertEqual(len(events),7)
+                self.assertTrue(all(e['mapping_status']=='exact_frontier' for e in events))
+                decisions=[e for e in events if e['alternatives'][0]['kind']=='decision']
+                self.assertEqual(len(decisions),5)
+                login,cancel,allowed=bool(index&4),bool(index&2),bool(index&1)
+                truths=[not login and not cancel,login or cancel,not allowed,not(login and cancel),(login or cancel) and allowed]
+                self.assertEqual([e['alternatives'][0]['evidence'].endswith('/ true') for e in decisions],truths)
+        finally:reader.close()
+
     def test_shared_variants_are_not_arbitrarily_chosen(self):
         path=Path(os.environ.get('APPLICATION_FIXTURE',ROOT.parent/'artifacts/application-v6-delivery'))
         if not (path/'application-variants.sqlite').exists():

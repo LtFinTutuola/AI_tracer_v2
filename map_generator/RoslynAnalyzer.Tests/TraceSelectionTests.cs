@@ -112,7 +112,7 @@ internal static class TraceSelectionTests
         using(var db=new SqliteConnection($"Data Source={database};Pooling=False")) {
             db.Open();using var cmd=db.CreateCommand();cmd.CommandText="SELECT count(*) FROM basic_blocks WHERE to_trace=0";
             assert(Convert.ToInt64(cmd.ExecuteScalar())==result.Disabled.Count,"Flag application uses existing IDs");
-            cmd.CommandText="SELECT value FROM analysis_manifest WHERE key='schema_version'";assert((string?)cmd.ExecuteScalar()=="6","Schema 6 published contract");
+            cmd.CommandText="SELECT value FROM analysis_manifest WHERE key='schema_version'";assert((string?)cmd.ExecuteScalar()=="7","Schema 7 published contract");
             cmd.CommandText="SELECT count(*) FROM trace_selection_decisions WHERE profile_id=@id";cmd.Parameters.AddWithValue("@id",profile);
             assert(Convert.ToInt64(cmd.ExecuteScalar())==result.ProbeCount,"Every legacy probe has an auditable decision");
         }

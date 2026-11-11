@@ -1,4 +1,4 @@
-"""Read-only schema 3..6 queries and bounded application trace decoding."""
+"""Read-only schema 3..7 queries and bounded application trace decoding."""
 import argparse
 from collections import OrderedDict, deque
 import json
@@ -14,8 +14,8 @@ class BlockContextReader:
         self.cache = OrderedDict()
         try:
             self.manifest = dict(self.connection.execute('SELECT key,value FROM analysis_manifest'))
-            if self.manifest.get('schema_version') not in ('3', '4', '5', '6') or self.manifest.get('state') != 'validated':
-                raise ValueError('Schema 3..6 validated catalog required; regenerate the database')
+            if self.manifest.get('schema_version') not in ('3', '4', '5', '6', '7', '8') or self.manifest.get('state') != 'validated':
+                raise ValueError('Schema 3..7 validated catalog required; regenerate the database')
         except Exception:
             self.connection.close()
             raise
@@ -65,7 +65,7 @@ class BlockContextReader:
                                     AND NOT EXISTS(SELECT 1 FROM legacy_probe_variants s WHERE s.legacy_id=? AND s.variant_id=v.id)
                                   ORDER BY v.id''', (legacy[0]['file_path'], legacy_id))
         selection = None
-        if self.manifest.get('schema_version') in ('4', '5', '6'):
+        if self.manifest.get('schema_version') in ('4', '5', '6', '7', '8'):
             decisions = self.rows('''SELECT d.enabled,d.reason,d.profile_id,p.status,p.options_json,p.metrics_json
                 FROM trace_selection_decisions d JOIN trace_selection_profiles p ON p.id=d.profile_id
                 WHERE d.legacy_id=?''', (legacy_id,))
@@ -74,24 +74,34 @@ class BlockContextReader:
                 selection['enabled'] = bool(selection['enabled'])
                 selection['options'] = json.loads(selection.pop('options_json'))
                 selection['metrics'] = json.loads(selection.pop('metrics_json'))
-        interest = self.rows('SELECT rule,detail FROM trace_interest_evidence WHERE legacy_id=? ORDER BY rule,detail LIMIT 51', (legacy_id,)) if self.manifest.get('schema_version') in ('5','6') else []
+        interest = self.rows('SELECT rule,detail FROM trace_interest_evidence WHERE legacy_id=? ORDER BY rule,detail LIMIT 51', (legacy_id,)) if self.manifest.get('schema_version') in ('5','6','7','8') else []
         application = self.rows('''SELECT o.*,l.node_id,l.position,l.edge_id FROM application_observations o
             JOIN application_probe_bindings b ON b.observation_id=o.id LEFT JOIN application_locations l ON l.observation_id=o.id
-            WHERE b.legacy_id=? ORDER BY o.variant_id,o.id LIMIT 1001''', (legacy_id,)) if self.manifest.get('schema_version') == '6' else []
+            WHERE b.legacy_id=? ORDER BY o.variant_id,o.id LIMIT 1001''', (legacy_id,)) if self.manifest.get('schema_version') in ('6','7','8') else []
+        # One observation may have several alternative CFG locations in schema 7.
+        application_rows_limited = len(application)>1000
+        grouped = {}
+        for row in application:
+            item = grouped.setdefault(row['id'], {k:v for k,v in row.items() if k not in ('node_id','position','edge_id')} | {'locations': [], 'node_id': row['node_id'], 'position':row['position'], 'edge_id':row['edge_id']})
+            if row['node_id'] is not None:
+                item['locations'].append({k:row[k] for k in ('node_id','position','edge_id')})
+        application = list(grouped.values())
         for method_id in dict.fromkeys(o['method_id'] for o in application):
             if not any(m['id'] == method_id for m in methods):
                 methods += self.rows('SELECT * FROM methods WHERE id=?', (method_id,))
         application_selected = []
-        if self.manifest.get('schema_version') == '6':
+        if self.manifest.get('schema_version') in ('6','7','8'):
             application_selected=self.rows('''SELECT DISTINCT v.id,v.name,v.path FROM application_probe_bindings b
                 JOIN application_observations o ON o.id=b.observation_id JOIN project_variants v ON v.id=o.variant_id
                 WHERE b.legacy_id=? ORDER BY v.id''',(legacy_id,))
             for row in self.rows('SELECT method_id FROM application_probe_contexts WHERE legacy_id=?',(legacy_id,)):
                 if not any(m['id']==row['method_id'] for m in methods):
                     methods += self.rows('SELECT * FROM methods WHERE id=?',(row['method_id'],))
+        static_decision = self.rows('SELECT * FROM static_flow_decisions WHERE probe_id=?', (legacy_id,)) if self.manifest.get('schema_version') == '8' else []
         return {'manifest': self.manifest, 'legacy': legacy[0], 'mapping': links, 'methods': methods,
+                'static_flow_decision': static_decision[0] if static_decision else None,
                 'interest_evidence': interest[:50], 'interest_evidence_has_more': len(interest) > 50,
-                'application_observations': application[:1000], 'application_has_more': len(application)>1000,
+                'application_observations': application[:1000], 'application_has_more': application_rows_limited or len(application)>1000,
                 'application_selected_by': application_selected,
                 'trace_enabled': bool(legacy[0].get('to_trace', 1)), 'trace_selection': selection,
                 'selected_by': selected, 'compiled_by_without_selection': unselected,
@@ -99,8 +109,8 @@ class BlockContextReader:
 
     def get_application_entries(self, limit=1000, offset=0, classification=None):
         self._page(limit, offset)
-        if self.manifest.get('schema_version') != '6':
-            raise ValueError('Application entries require schema 6; regenerate')
+        if self.manifest.get('schema_version') not in ('6','7'):
+            raise ValueError('Application entries require schema 6/7; regenerate')
         if classification not in (None, 'observed', 'technical', 'opaque', 'unclassified'):
             raise ValueError('Invalid application entry classification')
         entries = self.rows('''SELECT e.*,m.signature,d.path,v.name AS project_name,m.variant_id
@@ -110,7 +120,10 @@ class BlockContextReader:
             (classification, classification, limit+1, offset))
         return {'entries': entries[:limit], 'next_offset': offset+limit if len(entries)>limit else None}
 
-    def decode_log(self, log, build_manifest, **limits):
+    def decode_log(self, log, build_manifest=None, **limits):
+        if self.manifest.get('injection_contract') == 'static_probes_v1':
+            from static_flow_decoder import StaticFlowDecoder
+            return StaticFlowDecoder(self, build_manifest, **limits).decode(log)
         from application_decoder import ApplicationDecoder
         return ApplicationDecoder(self, build_manifest, **limits).decode(log)
 
@@ -281,12 +294,13 @@ def main():
     if len(sys.argv)>1 and sys.argv[1]=='decode-log':
         from application_decoder import ApplicationDecoder
         parser=argparse.ArgumentParser(description='Decode application observations with bounded source-model search')
-        parser.add_argument('database');parser.add_argument('log');parser.add_argument('--build-manifest',required=True)
+        parser.add_argument('database');parser.add_argument('log');parser.add_argument('--build-manifest')
+        parser.add_argument('--allow-unverified',action='store_true')
         parser.add_argument('--max-states',type=int,default=100000);parser.add_argument('--max-depth',type=int,default=32)
         parser.add_argument('--max-candidates',type=int,default=8);parser.add_argument('--max-memory-mb',type=int,default=128)
         args=parser.parse_args(sys.argv[2:]);reader=BlockContextReader(args.database)
         try:
-            decoder=ApplicationDecoder(reader,args.build_manifest,args.max_states,args.max_depth,args.max_candidates,args.max_memory_mb)
+            decoder=ApplicationDecoder(reader,args.build_manifest,args.max_states,args.max_depth,args.max_candidates,args.max_memory_mb,allow_unverified=args.allow_unverified)
             for item in decoder.decode(args.log):
                 print(json.dumps(item,ensure_ascii=False))
         finally:

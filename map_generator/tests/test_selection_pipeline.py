@@ -29,7 +29,7 @@ class SelectionPipelineTests(unittest.TestCase):
         self.assertTrue((output / 'application-profile-report.json').exists())
         with closing(sqlite3.connect((output / 'basic_blocks.sqlite').as_uri() + '?mode=ro', uri=True)) as database:
             flags = database.execute('SELECT id,to_trace FROM basic_blocks ORDER BY id').fetchall()
-            self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '6')
+            self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '7')
             self.assertEqual(database.execute('SELECT count(*) FROM application_observations WHERE status=\'modeled\'').fetchone()[0],
                              database.execute('SELECT count(DISTINCT observation_id) FROM application_probe_bindings').fetchone()[0])
             self.assertEqual(database.execute('SELECT count(*) FROM basic_blocks').fetchone()[0], summary['counts']['basic_blocks'])
@@ -81,6 +81,25 @@ EndGlobal
         return subprocess.run(['dotnet', str(DLL), str(self.solution), 'net8.0', str(output), 'Debug', *options],
                               text=True, capture_output=True, timeout=120)
 
+    def test_static_pipeline_and_copy(self):
+        output = self.folder / 'static-output'
+        result = self.run_analyzer(output, '--selection-mode', 'static', '--ambiguity-budget', '0', '--repeat-policy', 'boundaries')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        path = output / 'basic_blocks.sqlite'
+        with closing(sqlite3.connect(path)) as database:
+            meta = dict(database.execute('SELECT key,value FROM analysis_manifest'))
+            self.assertEqual(meta['schema_version'], '8')
+            self.assertEqual(meta['injection_contract'], 'static_probes_v1')
+            self.assertEqual(database.execute('SELECT count(*) FROM basic_blocks b JOIN static_flow_decisions d ON d.probe_id=b.id WHERE b.to_trace<>d.enabled').fetchone()[0], 0)
+            self.assertTrue(database.execute('SELECT count(*) FROM static_flow_sources').fetchone()[0])
+        self.assertTrue((output / 'static-flow-report.json').exists())
+        copy = self.folder / 'static-copy'
+        result = subprocess.run(['dotnet', str(DLL), '--select-catalog', str(path), str(copy),
+                                 '--selection-mode', 'static', '--ambiguity-budget', '0'], text=True, capture_output=True, timeout=120)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        with closing(sqlite3.connect(copy / 'basic_blocks.sqlite')) as database:
+            self.assertEqual(dict(database.execute('SELECT key,value FROM analysis_manifest'))['injection_contract'], 'static_probes_v1')
+
     def test_selected_and_disabled_pipeline(self):
         self.assertTrue(DLL.exists(), 'Build RoslynAnalyzer.slnx first')
         for enabled in (True, False):
@@ -96,7 +115,7 @@ EndGlobal
                 with closing(sqlite3.connect((output / 'basic_blocks.sqlite').as_uri() + '?mode=ro', uri=True)) as database:
                     self.assertEqual(database.execute('SELECT count(*),sum(to_trace) FROM basic_blocks').fetchone(), (3, 2 if enabled else 3))
                     self.assertEqual(database.execute('SELECT count(*) FROM trace_selection_decisions').fetchone()[0], 3)
-                    self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '6')
+                    self.assertEqual(database.execute("SELECT value FROM analysis_manifest WHERE key='schema_version'").fetchone()[0], '7')
                 if enabled:
                     self.assertEqual(selection['validation']['SilentExecutions'], 0)
                     self.assertEqual(selection['validation']['EventReductionFraction'], .5)

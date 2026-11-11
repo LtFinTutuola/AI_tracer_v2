@@ -10,6 +10,8 @@ public static class TraceSelectionStore
 {
     public static void WriteApplicationReport(string directory,TraceSelectionResult result)
     {
+        if(result.Static is { } flow)File.WriteAllText(Path.Combine(directory,"static-flow-report.json"),JsonSerializer.Serialize(new {
+            summary=flow.Summary,regions=flow.Regions,methods=flow.Methods,obligations=flow.Obligations,decisions=flow.Decisions.Values.OrderBy(d=>d.Probe)},new JsonSerializerOptions {WriteIndented=true}));
         if(result.Application is not { } plan)return;
         File.WriteAllText(Path.Combine(directory,"application-profile-report.json"),JsonSerializer.Serialize(new {
             summary=plan.Summary,entries=plan.Entries,observations=plan.Observations.Values.OrderBy(o=>o.Method).ThenBy(o=>o.Kind),
@@ -50,20 +52,22 @@ public static class TraceSelectionStore
         }
         void Set(string key,string value)=>Run("INSERT INTO analysis_manifest(key,value) VALUES(@p0,@p1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",key,value);
         string oldState=Meta("state")??"";
-        if(result.Application==null&&Meta("injection_contract")=="application_edits_v1")throw new InvalidOperationException("An application catalog cannot be requalified as legacy/disabled; regenerate with that mode");
+        if(result.Application==null&&Meta("injection_contract") is "application_edits_v1" or "static_probes_v1")throw new InvalidOperationException("An instrumented catalog cannot be requalified as legacy/disabled; regenerate with that mode");
         if(oldState!="graph_validated"&&oldState!="validated")throw new InvalidOperationException("Selection requires a validated graph");
-        if(Meta("schema_version") is not ("3" or "4" or "5" or "6"))throw new InvalidOperationException("Selection requires context schema 3..6; regenerate the catalog");
+        if(Meta("schema_version") is not ("3" or "4" or "5" or "6" or "7" or "8"))throw new InvalidOperationException("Selection requires context schema 3..8; regenerate the catalog");
         string extraction=Meta("extraction_coverage")??Meta("coverage")??"partial";
         string knownInputs=Meta("input_manifest")??"[]",previousPolicy=Meta("application_policy_path")??"";
         InputRegistry.VerifyManifest(knownInputs,token,result.Application==null?null:previousPolicy.Length==0?null:previousPolicy);
-        if(result.Application!=null) {
+        if(result.Application!=null&&options.ObservationPolicy.Length>0) {
             string updated=InputRegistry.ReplacePolicy(knownInputs,previousPolicy,options.ObservationPolicy);
             Set("input_manifest",updated);Set("fingerprint",ContextCatalog.Id(updated));Set("application_policy_path",Path.GetFullPath(options.ObservationPolicy));
         }
         string input=Meta("fingerprint")??"";
         Run(Schema);
         result.Application?.Inputs.Verify(token);
+        if(result.Static!=null&&result.Application!.Edits.Any(e=>!StaticFlowPlan.IsBlindEdit(e)))throw new InvalidOperationException("Non-blind static edit");
         result.Application?.Persist(db,tx,token);
+        result.Static?.Persist(db,tx,token);
         var baseline=new Dictionary<long,bool>();
         cmd.Parameters.Clear();cmd.CommandText="SELECT id,to_trace FROM basic_blocks ORDER BY id";
         using(var rows=cmd.ExecuteReader())while(rows.Read())baseline[rows.GetInt64(0)]=rows.GetInt32(1)!=0;
@@ -97,7 +101,7 @@ public static class TraceSelectionStore
         if(result.Interest!=null)foreach(var evidence in result.Interest.Evidence) {
             token.ThrowIfCancellationRequested();Run("INSERT OR IGNORE INTO trace_interest_evidence VALUES(@p0,@p1,@p2)",evidence.Id,evidence.Rule,evidence.Detail);
         }
-        Set("schema_version",Meta("schema_version")=="6"?"6":"5");Set("extraction_coverage",extraction);
+        Set("schema_version",Meta("schema_version") is "6" or "7" or "8"?Meta("schema_version")!:"5");Set("extraction_coverage",extraction);
         Set("interest_filter_status",result.Interest==null?(options.InterestFilterEnabled?"not_applied":"disabled"):result.Status=="fallback"?"discarded":"experimental_applied");
         Set("selection_profile_id",id);Set("selection_status",result.Status);Set("selection_options",optionsJson);
         Set("selection_summary",metrics);Set("selection_coverage",result.Partial?"partial":"complete_for_declared_model");
@@ -114,6 +118,10 @@ public static class TraceSelectionStore
         cmd.Parameters.Clear();cmd.CommandText="SELECT count(*) FROM trace_selection_decisions d JOIN basic_blocks b ON b.id=d.legacy_id WHERE b.to_trace<>d.enabled";
         if(Convert.ToInt64(cmd.ExecuteScalar())!=0)throw new InvalidOperationException("Selection flags do not match decisions");
         cmd.CommandText="PRAGMA foreign_key_check";using(var rows=cmd.ExecuteReader())if(rows.Read())throw new InvalidOperationException("Selection foreign keys failed");
+        if(result.Application!=null) {
+            cmd.CommandText="SELECT count(*) FROM application_locations l JOIN application_observations o ON o.id=l.observation_id JOIN flow_nodes n ON n.id=l.node_id JOIN methods m ON m.id=n.method_id LEFT JOIN flow_edges e ON e.id=l.edge_id WHERE n.method_id<>o.method_id OR m.variant_id<>o.variant_id OR (l.edge_id IS NOT NULL AND e.source_id<>l.node_id)";
+            if(Convert.ToInt64(cmd.ExecuteScalar())!=0)throw new InvalidOperationException("Application location method/variant mismatch");
+        }
         result.Application?.Inputs.Verify(token);token.ThrowIfCancellationRequested();Set("state","validated");tx.Commit();
         return id;
     }
@@ -143,7 +151,7 @@ public static class TraceSelectionStore
                 input.Open();copy.Open();using var check=input.CreateCommand();check.CommandText="SELECT value FROM analysis_manifest WHERE key='state'";
                 if((string?)check.ExecuteScalar()!="validated")throw new InvalidOperationException("Unvalidated qualification input");
                 check.CommandText="SELECT value FROM analysis_manifest WHERE key='schema_version'";
-                if(check.ExecuteScalar() as string is not ("3" or "4" or "5" or "6"))throw new InvalidOperationException("Selection requires context schema 3..6; regenerate the catalog");
+                if(check.ExecuteScalar() as string is not ("3" or "4" or "5" or "6" or "7" or "8"))throw new InvalidOperationException("Selection requires context schema 3..8; regenerate the catalog");
                 input.BackupDatabase(copy);
             }
             var result=await Task.Run(()=>TraceSelectionEngine.Select(staging.Path,options,cancellation.Token,progress),cancellation.Token);

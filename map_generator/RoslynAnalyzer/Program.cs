@@ -29,6 +29,7 @@ internal class Program
         }
     }
     private static async Task<int> Run(string[] args) {
+        if(args.FirstOrDefault()=="--analyze-static-catalog")return StaticFlowSelection.AnalyzeOnly(args,(phase,details)=>Progress(phase,details:details));
         if(args.FirstOrDefault()=="--select-catalog")
             return await TraceSelectionStore.QualifyCopy(args,(phase,details)=>Progress(phase,details:details));
         var options=AnalyzerOptions.Parse(args);
@@ -80,7 +81,7 @@ internal class Program
         workspace.LoadMetadataForReferencedProjects=false;
         var errors=new List<string>();workspace.WorkspaceFailed+=(_,e)=>errors.Add(e.Diagnostic.Message);
         var inputs=new InputRegistry();inputs.Track(options.Solution);
-        if(options.Selection.Enabled&&options.Selection.Mode=="application")inputs.Track(options.Selection.ObservationPolicy);
+        if(options.Selection.Enabled&&options.Selection.Mode is "application" or "static"&&options.Selection.ObservationPolicy.Length>0)inputs.Track(options.Selection.ObservationPolicy);
         Progress("open_solution");var clock=Stopwatch.StartNew();
         var solution=await workspace.OpenSolutionAsync(options.Solution,cancellationToken:token);
         timings["load_ms"]=clock.Elapsed.TotalMilliseconds;

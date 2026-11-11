@@ -48,15 +48,16 @@ public sealed class TraceSelectionResult
     public InterestFilterResult? Interest {get;set;}
     public JsonElement? FirstLevel {get;set;}
     public ApplicationPlan? Application {get;set;}
-    public string AlgorithmName=>Application==null?Algorithm:ApplicationPlan.Algorithm;
+    public StaticFlowPlan? Static {get;set;}
+    public string AlgorithmName=>Static!=null?StaticFlowPlan.Algorithm:Application==null?Algorithm:ApplicationPlan.Algorithm;
     public const string Algorithm="ordered_partition_greedy_application_interest_v4";
     public object Summary=>new {algorithm=AlgorithmName,status=Status,partial=Partial,
         options=Options,
-        qualification_policy=Application==null?"protect_unqualified_method_owners_only":"exact_source_witnesses_for_declared_observations",
+        qualification_policy=Static!=null?"finite_normal_marker_languages_with_declared_repeat_losses":Application==null?"protect_unqualified_method_owners_only":"exact_source_witnesses_for_declared_observations",
         incomplete_callers_coverage=Application==null?"partial; qualified callees remain eligible":"opaque regions explicit; internal probes not globally protected",
         fallback_reason=FallbackReason,probes=ProbeCount,disabled=Disabled.Count,baseline_disabled=BaselineDisabledCount,
         enabled=ProbeCount-BaselineDisabledCount-Disabled.Count,metrics_scope=Application!=null?"declared_application_observations":Status=="fallback"?"discarded_candidate":Interest==null?"applied_profile":"experimental_application_interest_profile",
-        application=Application?.Summary,
+        application=Application?.Summary,static_flow=Static?.Summary,
         first_level=FirstLevel,interest_filter=Interest?.Summary,
         protected_probes=Protected.Count,protected_reasons=Protected.Values.GroupBy(reason=>reason).ToDictionary(group=>group.Key,group=>group.Count()),
         roots=Roots.Count,roots_without_events=RootsWithoutEvents,root_statuses=Roots.GroupBy(root=>root.Status).ToDictionary(group=>group.Key,group=>group.Count()),
@@ -66,7 +67,7 @@ public sealed class TraceSelectionResult
             calibration_ambiguity_fraction=CalibrationExecutions==0?0:(double)Fit.CalibrationAmbiguous/CalibrationExecutions,
             Fit.MaximumCandidates,Fit.EventsBefore,Fit.EventsAfter,event_reduction_fraction=Fit.EventsBefore==0?0:1-(double)Fit.EventsAfter/Fit.EventsBefore,Fit.TimeLimited},
         validation=Validation,validation_before_repair=ValidationBeforeRepair,
-        validation_role=Application!=null?"constructive_source_coverage; not exhaustive runtime accuracy":Interest!=null?"technical_reassessment; not functional accuracy":RestoredForActivity.Count>0?"repair_calibration":"independent_validation",
+        validation_role=Static!=null?"complete finite marker corpus where qualified; unresolved regions protected or explicitly abstracted":Application!=null?"constructive_source_coverage; not exhaustive runtime accuracy":Interest!=null?"technical_reassessment; not functional accuracy":RestoredForActivity.Count>0?"repair_calibration":"independent_validation",
         activity_repair=new {restored_count=RestoredForActivity.Count,restored_ids=RestoredForActivity.OrderBy(id=>id)},
         sample_outcomes=SampleOutcomes,opaque_calls=OpaqueCalls,
         peak_buffer_bytes=PeakBufferBytes,duration_seconds=DurationSeconds,corpus_fingerprint=CorpusFingerprint};
@@ -81,6 +82,7 @@ public static class TraceSelectionEngine
         options.Validate();var result=new TraceSelectionResult {Options=options};var resources=new SelectionResources(options,token);
         token.ThrowIfCancellationRequested();
         if(!options.Enabled){result.Status="disabled";return result;}
+        if(options.Mode=="static")return StaticFlowSelection.Build(catalogPath,options,token,progress);
         if(options.Mode=="application")return ApplicationObservationBuilder.Build(catalogPath,options,token,progress);
         TraceSelectionModel? model=null;
         try {

@@ -15,11 +15,18 @@ public sealed record TraceSelectionOptions
     public int MaxMemoryMb { get; init; } = 512;
     public int Seed { get; init; } = 1729;
     public bool InterestFilterEnabled { get; init; }
+    public string RepeatPolicy {get;init;}="boundaries";
+    public int MaxFlowStates {get;init;}=100000;
     public double InterestTargetFraction { get; init; } = .325;
 
     public void Validate()
     {
-        if(Mode is not ("legacy" or "application"))throw new ArgumentException("trace_selection.mode must be legacy or application");
+        if(Mode is not ("legacy" or "application" or "static"))throw new ArgumentException("trace_selection.mode must be legacy, application or static");
+        if(RepeatPolicy is not ("boundaries" or "detail" or "silent")||MaxFlowStates<1)throw new ArgumentException("Invalid static repeat policy or state budget");
+        if(Enabled&&Mode=="static") {
+            if(AmbiguityBudget!=0||InterestFilterEnabled)throw new ArgumentException("Static mode requires ambiguity_budget=0 and no interest filter");
+            if(ObservationPolicy.Length>0)ApplicationPolicy.Load(ObservationPolicy);
+        }
         if(Enabled&&Mode=="application") {
             if(AmbiguityBudget!=0||InterestFilterEnabled)throw new ArgumentException("Application mode requires ambiguity_budget=0 and the old interest filter disabled");
             if(string.IsNullOrWhiteSpace(ObservationPolicy))throw new ArgumentException("Application mode requires observation_policy");
@@ -41,6 +48,8 @@ public sealed record TraceSelectionOptions
         double Number() => double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
         return option switch {
             "--selection-mode"=>value with {Mode=text},
+            "--repeat-policy"=>value with {RepeatPolicy=text},
+            "--selection-max-flow-states"=>value with {MaxFlowStates=Integer()},
             "--observation-policy"=>value with {ObservationPolicy=Path.GetFullPath(text)},
             "--trace-selection" => value with { Enabled = bool.Parse(text) },
             "--ambiguity-budget" => value with { AmbiguityBudget = Number() },

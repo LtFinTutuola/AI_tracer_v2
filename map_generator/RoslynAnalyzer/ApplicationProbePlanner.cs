@@ -6,7 +6,7 @@ using Microsoft.Data.Sqlite;
 
 namespace RoslynAnalyzer;
 
-public sealed record ApplicationObservation(string Id,long Method,long Variant,string Kind,string Evidence,long? Point,string Status);
+public sealed record ApplicationObservation(string Id,long Method,long Variant,string Kind,string Evidence,long? Point,string Status,string MappingStatus="source_only",string MappingReason="No demonstrated CFG frontier");
 public sealed record ApplicationBinding(string Observation,long Probe);
 public sealed record ApplicationLocation(string Observation,long Node,int Position,long? Edge);
 public sealed record ApplicationPlacement(long Probe,string Kind,string Path,int Anchor,int Start,int End,string Hash,string Group);
@@ -24,7 +24,8 @@ public sealed class ApplicationPlan
     public List<ApplicationEdit> Edits {get;}=new();
     public Dictionary<string,ApplicationObservation> Observations {get;}=new();
     public HashSet<ApplicationBinding> Bindings {get;}=new();
-    public Dictionary<string,ApplicationLocation> Locations {get;}=new();
+    public HashSet<ApplicationLocation> Locations {get;}=new();
+    public int SchemaVersion {get;set;}=7;
     public List<ApplicationEntry> Entries {get;}=new();
     public List<ApplicationSummary> Summaries {get;}=new();
     public HashSet<long> Enabled {get;}=new();
@@ -36,7 +37,7 @@ public sealed class ApplicationPlan
     public object Summary=>new {algorithm=Algorithm,policy_fingerprint=PolicyFingerprint,observation_budget=0,
         observation_scope="declared source observations; no value payload or exhaustive reflection/async correlation",
         entries=Entries.Count,entry_classifications=Entries.GroupBy(e=>e.Classification).ToDictionary(g=>g.Key,g=>g.Count()),
-        observations=Observations.Count,bindings=Bindings.Count,cfg_locations=Locations.Count,new_probes=NewProbes.Count,enabled=Enabled.Count,
+        observations=Observations.Count,bindings=Bindings.Count,cfg_locations=Locations.Count,mapping_statuses=Observations.Values.GroupBy(o=>o.MappingStatus).ToDictionary(g=>g.Key,g=>g.Count()),new_probes=NewProbes.Count,enabled=Enabled.Count,
         opaque_observations=Observations.Values.Count(o=>o.Status!="modeled"),unclassified_entries=Unresolved,
         shared_variant_ambiguities=SharedAmbiguities,unmapped_compilation_variants=UnmappedCompilationVariants,coverage_verification="constructive exact-placement witnesses; no sampled accuracy claim",
         repeated_observation_methods=Summaries.Count(s=>s.Repeated&&s.Flags!=0)};
@@ -48,8 +49,11 @@ public sealed class ApplicationPlan
         foreach(var (id,r) in NewProbes)Run("INSERT INTO basic_blocks(id,project_name,file_path,method_signature,scope_start_line,scope_end_line,block_start_line,block_end_line,injection_line,injection_offset,reason,to_trace,wrap_in_block,statement_end_offset) VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,@p10,1,0,0)",
             id,r.ProjectName,r.FilePath,r.MethodSignature,r.ScopeStartLine,r.ScopeEndLine,r.BlockStartLine,r.BlockEndLine,r.InjectionLine,r.InjectionOffset,r.Reason);
         foreach(var p in Placements.Values.OrderBy(p=>p.Probe))Run("INSERT OR IGNORE INTO application_placements VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7)",p.Probe,p.Kind,p.Path,p.Anchor,p.Start,p.End,p.Hash,p.Group);
-        foreach(var o in Observations.Values.OrderBy(o=>o.Id,StringComparer.Ordinal))Run("INSERT INTO application_observations VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)",o.Id,o.Method,o.Variant,o.Kind,o.Evidence,o.Point,o.Status);
-        foreach(var l in Locations.Values)Run("INSERT INTO application_locations VALUES(@p0,@p1,@p2,@p3)",l.Observation,l.Node,l.Position,l.Edge);
+        foreach(var o in Observations.Values.OrderBy(o=>o.Id,StringComparer.Ordinal)) {
+            if(SchemaVersion>=7)Run("INSERT INTO application_observations VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8)",o.Id,o.Method,o.Variant,o.Kind,o.Evidence,o.Point,o.Status,o.MappingStatus,o.MappingReason);
+            else Run("INSERT INTO application_observations VALUES(@p0,@p1,@p2,@p3,@p4,@p5,@p6)",o.Id,o.Method,o.Variant,o.Kind,o.Evidence,o.Point,o.Status);
+        }
+        foreach(var l in Locations)Run("INSERT INTO application_locations(observation_id,node_id,position,edge_id) VALUES(@p0,@p1,@p2,@p3)",l.Observation,l.Node,l.Position,l.Edge);
         foreach(var b in Bindings.OrderBy(b=>b.Observation,StringComparer.Ordinal).ThenBy(b=>b.Probe)) {
             Run("INSERT INTO application_probe_bindings VALUES(@p0,@p1)",b.Observation,b.Probe);
             var o=Observations[b.Observation];
@@ -81,7 +85,7 @@ public static class ApplicationObservationBuilder
         var plan=new ApplicationPlan {PolicyFingerprint=policy.Fingerprint,PolicyJson=policyText};plan.Inputs.Track(options.ObservationPolicy,policyText);
         using var db=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=path,Mode=SqliteOpenMode.ReadOnly,Pooling=false}.ToString());db.Open();
         using(var setup=db.CreateCommand()){setup.CommandText="PRAGMA cache_size=-1024";setup.ExecuteNonQuery();resources.Reserve(1024*1024);}
-        using(var schema=db.CreateCommand()){schema.CommandText="SELECT value FROM analysis_manifest WHERE key='schema_version'";if((string?)schema.ExecuteScalar()!="6")throw new InvalidOperationException("Application mode requires schema 6 facts; regenerate the catalog before selection");}
+        using(var schema=db.CreateCommand()){schema.CommandText="SELECT value FROM analysis_manifest WHERE key='schema_version'";string? version=(string?)schema.ExecuteScalar();if(version is not ("6" or "7"))throw new InvalidOperationException("Application mode requires schema 6/7 facts; regenerate the catalog before selection");plan.SchemaVersion=int.Parse(version);}
         void Rows(string sql,Action<SqliteDataReader> read,params object[] args) {using var c=db.CreateCommand();c.CommandText=sql;for(int i=0;i<args.Length;i++)c.Parameters.AddWithValue("@p"+i,args[i]);using var r=c.ExecuteReader();while(r.Read()){resources.Check();read(r);}}
         var symbols=new Dictionary<string,ApplicationSymbol>(StringComparer.Ordinal);
         Rows("SELECT key,description FROM application_symbols",r=>{string json=r.GetString(1);resources.Reserve(256+json.Length*3L);symbols[r.GetString(0)]=JsonSerializer.Deserialize<ApplicationSymbol>(json)!;});
@@ -129,7 +133,7 @@ public static class ApplicationObservationBuilder
             if(operation&&m.Supported)planner.Operation(m,role!,symbols[m.Symbol].Member==".ctor");
             else if(operation||role=="opaque")planner.Opaque(m,"unsupported_or_explicit_opaque_body");
             if(operation&&!m.Supported)continue;
-            Rows("SELECT kind,symbol_key,anchor,edit_offset,span_start,span_end,repeated,payload FROM application_facts WHERE method_id=@p0 ORDER BY anchor,kind",r=>{
+            Rows("SELECT kind,symbol_key,anchor,edit_offset,span_start,span_end,repeated,payload,id FROM application_facts WHERE method_id=@p0 ORDER BY anchor,kind",r=>{
                 string kind=r.GetString(0),key=r.GetString(1);bool repeated=r.GetInt32(6)!=0;using var payload=JsonDocument.Parse(r.GetString(7));var p=payload.RootElement;
                 bool decision=p.TryGetProperty("references",out var refs)&&refs.EnumerateArray().Any(s=>Role(s.GetString()!)=="decision");
                 string? targetRole=key==""?null:Role(key);
@@ -142,7 +146,7 @@ public static class ApplicationObservationBuilder
                 }
                 if(selected) {
                     if(!m.PhysicalSource||!File.Exists(m.Path))planner.Opaque(m,"nonphysical_observation_source");
-                    else planner.Fact(m,kind,r.GetInt32(2),r.GetInt32(3),r.GetInt32(4),r.GetInt32(5),p,kind=="assignment"?"state_assignment_completed":kind=="call"?"operation_call":"decision",repeated);
+                    else planner.Fact(m,kind,r.GetInt32(2),r.GetInt32(3),r.GetInt32(4),r.GetInt32(5),p,kind=="assignment"?"state_assignment_completed":kind=="call"?"operation_call":"decision",repeated,r.GetInt64(8));
                 }
             },m.Id);
         }
@@ -239,9 +243,41 @@ public sealed class ApplicationProbePlanner
         for(int i=0;i<args.Length;i++)cmd.Parameters.AddWithValue("@p"+i,args[i]);
         using var r=cmd.ExecuteReader();ApplicationLocation? location=null;int count=0;
         while(r.Read()){resources.Check();count++;location=new(observation,r.GetInt64(0),r.GetInt32(1),r.IsDBNull(2)?null:r.GetInt64(2));if(count>1)break;}
-        if(count==1)plan.Locations[observation]=location!;
+        if(count==1) {plan.Locations.Add(location!);plan.Observations[observation]=plan.Observations[observation] with {MappingStatus="exact_frontier",MappingReason="Exact method boundary"};}
     }
     private static string Log(long id)=>"\n#line hidden\nAITracer.Runtime.TraceContext.Log("+id+");\n#line default\n";
+    internal void BlindEntry(ApplicationMethod m,bool constructor=false) {
+        if(m.ExpressionStart>=0||!m.Supported||!m.PhysicalSource)return;
+        Source(m);long probe=Probe(m,"before",m.BodyStart-1,m.BodyStart,m.BodyEnd,"static-entry:"+m.BodyStart);
+        if(edited.Add(probe))plan.Edits.Add(new(m.Path,m.BodyStart,0,Log(probe),0,probe));
+        string observation=Observation(m,"method_body_enter","body reached; constructor initializers precede this marker",probe,m.BodyStart);
+        if(constructor) {
+            Locate(observation,m,"SELECT p.node_id,p.position,NULL FROM flow_points p JOIN flow_nodes n ON n.id=p.node_id WHERE n.method_id=@method AND n.reachable=1 AND p.kind='source_before' AND p.start>=@p0 AND p.start<@p1 ORDER BY p.start,p.position LIMIT 1",m.BodyStart,m.BodyEnd);
+        } else Locate(observation,m,"SELECT id,0,NULL FROM flow_nodes WHERE method_id=@method AND kind='Entry'");
+    }
+    internal void BlindLoopBoundaries(ApplicationMethod m) {
+        Source(m);
+        var root=Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(currentText).GetRoot();
+        foreach(var loop in root.DescendantNodes().OfType<Microsoft.CodeAnalysis.CSharp.Syntax.StatementSyntax>().Where(n=>
+            n is Microsoft.CodeAnalysis.CSharp.Syntax.ForStatementSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.ForEachStatementSyntax or
+            Microsoft.CodeAnalysis.CSharp.Syntax.WhileStatementSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.DoStatementSyntax)) {
+            resources.Check();
+            if(loop.SpanStart<m.BodyStart||loop.Span.End>m.BodyEnd||loop.Parent is not (Microsoft.CodeAnalysis.CSharp.Syntax.BlockSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.SwitchSectionSyntax))continue;
+            var ancestors=loop.Ancestors().TakeWhile(n=>n.SpanStart>=m.BodyStart);
+            if(ancestors.Any(n=>n is Microsoft.CodeAnalysis.CSharp.Syntax.AnonymousFunctionExpressionSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.LocalFunctionStatementSyntax or
+                Microsoft.CodeAnalysis.CSharp.Syntax.ForStatementSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.ForEachStatementSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.WhileStatementSyntax or Microsoft.CodeAnalysis.CSharp.Syntax.DoStatementSyntax))continue;
+            Boundary(loop.SpanStart,loop.SpanStart,"repeat_region_enter","loop statement reached; zero iterations remain possible");
+            Boundary(loop.Span.End-1,loop.Span.End,"repeat_region_after","control continued after loop; iteration count and exit reason are not observed");
+        }
+        void Boundary(int anchor,int edit,string kind,string evidence) {
+            string group="static-loop:"+kind+":"+anchor;
+            long id=Probe(m,"before",anchor,m.BodyStart,m.BodyEnd,group);
+            if(edited.Add(id))plan.Edits.Add(new(m.Path,edit,0,Log(id),100,id));
+            Observation(m,kind,evidence,id,anchor);
+            // Source-only until a dedicated CFG edge frontier is demonstrated.
+            // The selector retains these markers and makes no local uniqueness claim.
+        }
+    }
     internal void Operation(ApplicationMethod m,string role,bool constructor) {
         Source(m);string group=ContextCatalog.Id(m.Path.ToUpperInvariant(),m.BodyStart,m.BodyEnd);
         if(!groups.TryGetValue(group,out var ids)) {
@@ -265,12 +301,18 @@ public sealed class ApplicationProbePlanner
         if(constructor) {
             // Constructor initializers execute before the source-body wrapper.
             Locate(enterObservation,m,"SELECT p.node_id,p.position,NULL FROM flow_points p JOIN flow_nodes n ON n.id=p.node_id WHERE n.method_id=@method AND n.reachable=1 AND p.kind='source_before' AND p.start>=@p0 AND p.start<@p1 ORDER BY p.start,p.position LIMIT 1",m.BodyStart,m.BodyEnd);
-            if(!plan.Locations.ContainsKey(enterObservation))Locate(enterObservation,m,"SELECT n.id,p.position,NULL FROM flow_nodes n JOIN flow_points p ON p.node_id=n.id WHERE n.method_id=@method AND n.reachable=1 AND p.kind='exit'");
+            if(!plan.Locations.Any(l=>l.Observation==enterObservation))Locate(enterObservation,m,"SELECT n.id,p.position,NULL FROM flow_nodes n JOIN flow_points p ON p.node_id=n.id WHERE n.method_id=@method AND n.reachable=1 AND p.kind='exit'");
         } else Locate(enterObservation,m,"SELECT id,0,NULL FROM flow_nodes WHERE method_id=@method AND kind='Entry'");
         Locate(leaveObservation,m,"SELECT n.id,p.position,NULL FROM flow_nodes n JOIN flow_points p ON p.node_id=n.id WHERE n.method_id=@method AND p.kind='exit'");
     }
     internal void Opaque(ApplicationMethod m,string reason)=>Observation(m,"opaque",reason,null,m.Start,"opaque");
-    internal void Fact(ApplicationMethod m,string fact,int anchor,int edit,int start,int end,JsonElement payload,string observation,bool repeated) {
+    private void FactLocations(string observation,long fact,string phase) {
+        using var c=db.CreateCommand();c.CommandText="SELECT l.node_id,l.position,l.edge_id FROM application_fact_locations l WHERE l.fact_id=@f AND l.phase=@p ORDER BY l.id";c.Parameters.AddWithValue("@f",fact);c.Parameters.AddWithValue("@p",phase);
+        using(var r=c.ExecuteReader())while(r.Read()){resources.Check();if(plan.Locations.Add(new(observation,r.GetInt64(0),r.GetInt32(1),r.IsDBNull(2)?null:r.GetInt64(2))))resources.Reserve(128);}
+        c.CommandText="SELECT status,reason FROM application_fact_mappings WHERE fact_id=@f";c.Parameters.RemoveAt("@p");
+        using(var r=c.ExecuteReader())if(r.Read())plan.Observations[observation]=plan.Observations[observation] with {MappingStatus=r.GetString(0),MappingReason=r.GetString(1)};
+    }
+    internal void Fact(ApplicationMethod m,string fact,int anchor,int edit,int start,int end,JsonElement payload,string observation,bool repeated,long factId) {
         Source(m);string style=payload.GetProperty("style").GetString()!;
         if(style=="unsupported"||edit<0){Observation(m,"opaque",observation+": unsupported expression placement",null,anchor,"opaque");return;}
         string evidence=payload.TryGetProperty("label",out var label)?label.GetString()!:observation;
@@ -285,7 +327,8 @@ public sealed class ApplicationProbePlanner
             if(style=="wrap")plan.Edits.Add(new(m.Path,payload.GetProperty("arm_end").GetInt32(),0,"\n}",100000-depth*100,id));
         }
         string oid=Observation(m,observation,evidence,id,anchor);
-        if(fact=="arm") {
+        if(plan.SchemaVersion>=7)FactLocations(oid,factId,fact=="arm"?"decision":style=="after"?"after":"before");
+        else if(fact=="arm") {
             Locate(oid,m,"SELECT p.node_id,2147483647,e.id FROM flow_points p JOIN flow_nodes n ON n.id=p.node_id JOIN flow_edges e ON e.source_id=n.id WHERE n.method_id=@method AND p.kind='control' AND p.start=@p0 AND p.length=@p1 AND e.alternative=@p2",payload.GetProperty("condition_start").GetInt32(),payload.GetProperty("condition_length").GetInt32(),payload.GetProperty("truth").GetBoolean()?"true":"false");
         } else {
             int position=fact=="case"?payload.GetProperty("first_statement").GetInt32():style=="after"?end:start;
@@ -299,7 +342,8 @@ public sealed class ApplicationProbePlanner
                 int nextAnchor=Math.Max(start,after-1);long completed=Probe(m,"after",nextAnchor,start,end,group+":completed");
                 if(edited.Add(completed))plan.Edits.Add(new(m.Path,after,0,Log(completed),100,completed));
                 string completedObservation=Observation(m,"call_statement_completed",evidence,completed,nextAnchor,"opaque");
-                Locate(completedObservation,m,"SELECT p.node_id,p.position,NULL FROM flow_points p JOIN flow_nodes n ON n.id=p.node_id WHERE n.method_id=@method AND p.kind='source_after' AND p.start IN (@p0,@p1)",end,end-1);
+                if(plan.SchemaVersion>=7)FactLocations(completedObservation,factId,"after");
+                else Locate(completedObservation,m,"SELECT p.node_id,p.position,NULL FROM flow_points p JOIN flow_nodes n ON n.id=p.node_id WHERE n.method_id=@method AND p.kind='source_after' AND p.start IN (@p0,@p1)",end,end-1);
             }
         }
     }
@@ -312,6 +356,8 @@ public static class ApplicationProfileVerifier
         var covered=plan.Bindings.Select(b=>b.Observation).ToHashSet(StringComparer.Ordinal);
         foreach(var o in plan.Observations.Values){check();if(o.Status=="modeled"&&!covered.Contains(o.Id))throw new InvalidOperationException("Uncovered application observation: "+o.Id);}
         foreach(var b in plan.Bindings){check();if(!plan.Enabled.Contains(b.Probe)||!plan.Placements.ContainsKey(b.Probe))throw new InvalidOperationException("Observation has no enabled placement");}
+        var located=plan.Locations.Select(l=>l.Observation).ToHashSet();
+        foreach(var o in plan.Observations.Values)if(o.MappingStatus=="exact_frontier"&&!located.Contains(o.Id))throw new InvalidOperationException("Exact observation without a CFG frontier: "+o.Id);
         plan.SharedAmbiguities=plan.Bindings.GroupBy(b=>b.Probe).Count(g=>g.Select(b=>plan.Observations[b.Observation].Variant).Distinct().Skip(1).Any());
         // Do not let a source edit delete another active source observation.
         foreach(var group in plan.Edits.GroupBy(e=>e.Path,StringComparer.OrdinalIgnoreCase)) {

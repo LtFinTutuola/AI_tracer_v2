@@ -11,10 +11,10 @@ using Microsoft.Data.Sqlite;
 
 namespace RoslynAnalyzer;
 
-/// <summary>Schema 6: compact local flow, shared probes and application observation facts.</summary>
+/// <summary>Schema 7: compact local flow and semantic application frontiers.</summary>
 public sealed partial class ContextCatalog : IDisposable
 {
-    public const int SchemaVersion=6;
+    public const int SchemaVersion=7;
     private readonly SqliteConnection db;
     private SqliteTransaction? tx;
     private readonly Dictionary<string,SqliteCommand> commands=new();
@@ -433,7 +433,9 @@ public sealed partial class ContextCatalog : IDisposable
             if(Convert.ToInt64(cmd.ExecuteScalar())!=0)throw new InvalidOperationException("Invalid call, probe or method boundary");
             token.ThrowIfCancellationRequested();
             cmd.CommandText="SELECT count(*) FROM analysis_diagnostics";DiagnosticCount=Convert.ToInt32(cmd.ExecuteScalar());
-            foreach(var table in new[]{"project_variants","documents","methods","basic_blocks","flow_nodes","flow_points","flow_edges","call_sites","call_targets","legacy_block_links","legacy_probe_variants","shared_projection_stats","analysis_diagnostics","application_symbols","application_method_facts","application_facts","application_registrations"}) {
+            cmd.CommandText="SELECT count(*) FROM application_fact_locations l JOIN application_facts f ON f.id=l.fact_id JOIN flow_nodes n ON n.id=l.node_id LEFT JOIN flow_edges e ON e.id=l.edge_id WHERE f.method_id<>n.method_id OR (l.edge_id IS NOT NULL AND e.source_id<>l.node_id)";
+            if(Convert.ToInt64(cmd.ExecuteScalar())!=0)throw new InvalidOperationException("Invalid application fact frontier");
+            foreach(var table in new[]{"project_variants","documents","methods","basic_blocks","flow_nodes","flow_points","flow_edges","call_sites","call_targets","legacy_block_links","legacy_probe_variants","shared_projection_stats","analysis_diagnostics","application_symbols","application_method_facts","application_facts","application_fact_locations","application_fact_mappings","application_registrations"}) {
                 cmd.CommandText="SELECT count(*) FROM "+table;Counts[table]=Convert.ToInt64(cmd.ExecuteScalar());
             }
             Meta("input_manifest",Inputs.Manifest());Meta("fingerprint",Id(Inputs.Manifest()));
