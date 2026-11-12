@@ -194,6 +194,12 @@ def diagram(record,limit):
 
 
 def render_segment(out,record,limit):
+    if record['kind']=='static_local_path':
+        out.write(f"\n## Percorso intra-metodo {record['method_id']} · {record['status']}\n\n")
+        out.write(f"Thread `{record['thread_id']}` · Righe {record['first_line']}–{record['last_line']}. ")
+        out.write('Compatibilità della proiezione locale; identità delle attivazioni e collegamenti publisher/callback non dedotti.\n\n')
+        if record.get('reason'): out.write('Limite: '+cell(record['reason'])+'.\n\n')
+        return
     if record['kind']=='gap':
         out.write(f"\n## Lacuna alla riga {record['line']}\n\n{cell(record['reason'])}\n");return
     out.write(f"\n## {record['segment_id']} · {record['status']}\n\n")

@@ -1,5 +1,5 @@
 target_solution: "C:\\path\\to\\Target.sln"
-target_framework: "net8.0"
+target_framework: "auto"
 working_folder: "target-analysis"
 configuration: "Debug"
 platform: "AnyCPU"

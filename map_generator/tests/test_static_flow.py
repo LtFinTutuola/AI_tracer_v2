@@ -61,6 +61,9 @@ class StaticFlowDecoderTests(unittest.TestCase):
                                  'trace_selection': {'mode': 'static', 'ambiguity_budget': 0}}, ROOT)
         self.assertIn('--repeat-policy', command)
         self.assertIn('--selection-max-flow-states', command)
+        auto = build_command({'target_solution': 'app.sln', 'target_framework': 'auto', 'working_folder': 'static',
+                              'trace_selection': {'mode': 'static', 'ambiguity_budget': 0}}, ROOT)
+        self.assertEqual(auto[auto.index('app.sln') + 1], 'auto')
         for value in [{'mode': 'static'}, {'mode': 'static', 'ambiguity_budget': 0, 'repeat_policy': 'sample'},
                       {'mode': 'static', 'ambiguity_budget': 0, 'max_flow_states': 0}]:
             with self.assertRaises(ValueError):
@@ -104,6 +107,26 @@ class StaticFlowDecoderTests(unittest.TestCase):
         self.assertEqual(records[0]['status'], 'incomplete')
         self.assertTrue(records[0]['longer_candidates_remain'])
 
+    def test_local_projection_survives_callback_without_claiming_causality(self):
+        with closing(sqlite3.connect(self.db)) as c:
+            c.executescript("""
+                UPDATE static_flow_methods SET status='qualified_intra_method';
+                UPDATE static_flow_languages SET word_json='[10,40]';
+                INSERT INTO legacy_block_links VALUES(40,1);
+                INSERT INTO static_flow_decisions VALUES(40,1,'retained','');
+            """)
+            c.commit()
+        records = self.decode([self.line(10), self.line(20), self.line(40)])
+        local = [r for r in records if r['kind']=='static_local_path']
+        self.assertEqual(local[0]['matching_words'], [[10,40]])
+        self.assertEqual(local[0]['marker_lines'], [1,3])
+        self.assertEqual(local[0]['call_relations'], 'not_inferred')
+        self.assertEqual(sum(len(r.get('observations', [])) for r in records), 3)
+        restarted = self.decode([self.line(10), self.line(10), self.line(40)])
+        self.assertTrue(any(r.get('reason')=='repeated_entry_or_truncated_activation' for r in restarted))
+        separated = self.decode([self.line(10), self.line(40,2)])
+        self.assertFalse(any(r.get('matching_words') for r in separated))
+
 
 class CompiledStaticFlowTests(unittest.TestCase):
     def test_compiled_fixture_matches_and_renders(self):
@@ -116,6 +139,12 @@ class CompiledStaticFlowTests(unittest.TestCase):
             records = list(decoder.decode(folder / 'branch-True.log'))
             self.assertEqual(decoder.binding_status, 'verified')
             self.assertTrue(any(r.get('matching_methods') for r in records))
+            for name in ['event.log', 'WorkerA.log', 'WorkerB.log']:
+                if not (folder/name).exists():
+                    continue
+                decoded = list(StaticFlowDecoder(with_reader, folder/'fixture.aitracer.json').decode(folder/name))
+                self.assertTrue(any(r.get('kind')=='static_local_path' and r['status']=='compatible' for r in decoded),name)
+                self.assertTrue(any(r.get('matching_methods') for r in decoded), 'callback/concrete implementation observed: '+name)
             probe = next(e['probe_id'] for r in records for e in r.get('observations', []))
             context = with_reader.get_block_context(probe)
             self.assertIsNotNone(context['static_flow_decision'])

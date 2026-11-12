@@ -1,0 +1,18 @@
+target_solution: "C:\\repo\\8.1\\core\\TCPOS.DroidPos\\TCPOS.DroidPos.sln"
+# "auto" preserves the TargetFramework evaluated by MSBuild for every project.
+# Use an explicit value only as a legacy solution-wide override/filter.
+target_framework: "auto"
+working_folder: "droidpos_static"
+configuration: "Debug"
+platform: "AnyCPU"
+trace_selection:
+  enabled: true
+  mode: static
+  ambiguity_budget: 0
+  repeat_policy: boundaries
+  max_flow_states: 100000
+  max_duration_seconds: 600
+  max_memory_mb: 512
+  # Optional existing application policy: semantic observations and technical exclusions.
+  # observation_policy: profiles/droidpos.application.json
+  # max_call_depth and samples_per_root do not bound static composition.

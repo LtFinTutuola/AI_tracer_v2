@@ -22,7 +22,7 @@ internal sealed class StaticFlowModel
     public Dictionary<long,StaticFlowCall> Sites=new();
     public Dictionary<long,HashSet<long>> Owners=new();
     public Dictionary<long,List<(long Node,int Position)>> Links=new();
-    public HashSet<long> Opaque=new(),CyclicNodes=new(),Recursive=new(),Repeated=new();
+    public HashSet<long> Opaque=new(),OpenCalls=new(),CyclicNodes=new(),Recursive=new(),Repeated=new();
     public Dictionary<long,long> Components=new();
     public List<long[]> MethodComponents=new();
 
@@ -70,7 +70,7 @@ internal sealed class StaticFlowModel
             var call=new StaticFlowCall(r.GetInt64(0),node,r.GetInt32(4),caller,r.GetString(2),targets.GetValueOrDefault(r.GetInt64(0))?.ToArray()??Array.Empty<long>());
             model.Sites[call.Site]=call;
             foreach(long target in call.Targets)if(model.Calls.ContainsKey(target))model.Calls[caller].Add(target);
-            if(call.Resolution!="static"||call.Targets.Length!=1||!model.Calls.ContainsKey(call.Targets[0]))model.Opaque.Add(caller);
+            if(call.Resolution!="static"||call.Targets.Length!=1||!model.Calls.ContainsKey(call.Targets[0]))model.OpenCalls.Add(caller);
             else model.Nodes[node].Events.Add(new(call.Position,0,call.Targets[0]));
         });
         Rows("SELECT l.legacy_id,l.method_id,p.node_id,p.position FROM legacy_block_links l LEFT JOIN flow_points p ON p.id=l.point_id ORDER BY l.id",r=>{

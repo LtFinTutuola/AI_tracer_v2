@@ -231,6 +231,9 @@ using(var catalog=new ContextCatalog(emptyDb,"net8.0","Debug")) {
 string solutionPath=Path.Combine(directory,"options.sln");File.WriteAllText(solutionPath,"");
 var cli=AnalyzerOptions.Parse(new[]{solutionPath,"net8.0",directory,"Release","-","M:C.A","x64","--platform","AnyCPU","--include-project","A.csproj","--exclude-project","A.csproj"});
 Assert(cli.Configuration=="Release" && cli.Platform=="AnyCPU" && cli.Roots.Single()=="M:C.A","CLI positional compatibility and named platform");
+Assert(cli.WorkspaceProperties().GetValueOrDefault("TargetFramework")=="net8.0","Explicit framework override is preserved");
+var autoCli=AnalyzerOptions.Parse(new[]{solutionPath,"auto",directory,"Debug"});
+Assert(!autoCli.WorkspaceProperties().ContainsKey("TargetFramework"),"Auto framework mode does not override project evaluation");
 var filterProject=document.Project.Solution.WithProjectFilePath(document.Project.Id,Path.Combine(directory,"A.csproj")).GetProject(document.Project.Id)!;
 Assert(!cli.Includes(filterProject),"Exclusion takes precedence over inclusion");
 Throws<ArgumentException>(()=>AnalyzerOptions.Parse(new[]{solutionPath,"net8.0",directory,"Debug","graph.json"}),"Graphify envelope accepted");

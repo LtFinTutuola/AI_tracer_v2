@@ -120,8 +120,9 @@ public sealed partial class ContextCatalog : IDisposable
     }
     public long AddProject(Project project) {
         long result=0;
+        string effectiveFramework=ProjectFramework.Effective(project,framework);
         Batch(()=> {
-            var options=JsonSerializer.Serialize(new {framework,configuration,project.AssemblyName,
+            var options=JsonSerializer.Serialize(new {RequestedFramework=framework,EffectiveFramework=effectiveFramework,configuration,project.AssemblyName,
                 LanguageVersion=(project.ParseOptions as CSharpParseOptions)?.LanguageVersion.ToString(),
                 Nullable=(project.CompilationOptions as CSharpCompilationOptions)?.NullableContextOptions.ToString(),
                 Optimization=project.CompilationOptions?.OptimizationLevel.ToString(),

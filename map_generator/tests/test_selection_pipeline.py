@@ -12,6 +12,61 @@ DLL = ROOT / 'map_generator/RoslynAnalyzer/bin/Debug/net8.0/RoslynAnalyzer.dll'
 
 
 class SelectionPipelineTests(unittest.TestCase):
+    def test_auto_framework_preserves_mixed_project_targets(self):
+        mixed_temporary = tempfile.TemporaryDirectory(prefix='trace-mixed-frameworks-')
+        self.addCleanup(mixed_temporary.cleanup)
+        mixed = Path(mixed_temporary.name)
+        projects = [('Neutral', 'TargetFramework', 'net8.0', 'A'),
+                    ('Desktop', 'TargetFramework', 'net8.0-windows', 'B'),
+                    ('Multi', 'TargetFrameworks', 'net8.0;net8.0-windows', 'C')]
+        project_rows = []
+        configuration_rows = []
+        for index, (name, framework_property, framework, type_name) in enumerate(projects, 1):
+            guid = f'{{00000000-0000-0000-0000-{index:012d}}}'
+            generated_item = '<ItemGroup><Compile Include="obj/Generated.cs" /></ItemGroup>' if name == 'Multi' else ''
+            (mixed / f'{name}.csproj').write_text(
+                f'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><{framework_property}>{framework}</{framework_property}></PropertyGroup>{generated_item}</Project>')
+            (mixed / f'{name}.cs').write_text(f'public class {type_name} {{ public int Value() {{ return {index}; }} }}')
+            if name == 'Multi':
+                (mixed / 'obj').mkdir(exist_ok=True)
+                (mixed / 'obj/Generated.cs').write_text('public class GeneratedBinding { public int Value() { return 42; } }')
+            project_rows.append(f'Project("{{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}}") = "{name}", "{name}.csproj", "{guid}"\nEndProject')
+            configuration_rows.extend([
+                f'        {guid}.Debug|Any CPU.ActiveCfg = Debug|Any CPU',
+                f'        {guid}.Debug|Any CPU.Build.0 = Debug|Any CPU'])
+            restored = subprocess.run(['dotnet', 'restore', str(mixed / f'{name}.csproj'), '--ignore-failed-sources'],
+                                      text=True, capture_output=True, timeout=120)
+            self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        solution = mixed / 'Mixed.sln'
+        solution.write_text('Microsoft Visual Studio Solution File, Format Version 12.00\n# Visual Studio Version 17\n' +
+            '\n'.join(project_rows) + '''
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|Any CPU = Debug|Any CPU
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+''' + '\n'.join(configuration_rows) + '''
+    EndGlobalSection
+EndGlobal
+''')
+        output = mixed / 'output'
+        run = subprocess.run(['dotnet', str(DLL), str(solution), 'auto', str(output), 'Debug',
+                              '--trace-selection', 'false'], text=True, capture_output=True, timeout=180)
+        self.assertIn(run.returncode, (0, 2), run.stdout + run.stderr)
+        with closing(sqlite3.connect(output / 'basic_blocks.sqlite')) as database:
+            manifest = dict(database.execute('SELECT key,value FROM analysis_manifest'))
+            pairs = {(item['Name'], item['Framework']) for item in json.loads(manifest['project_frameworks'])}
+            self.assertIn(('Neutral', 'net8.0'), pairs)
+            self.assertIn(('Desktop', 'net8.0-windows'), pairs)
+            self.assertEqual({framework for name, framework in pairs if name.startswith('Multi')},
+                             {'net8.0', 'net8.0-windows'})
+            variants = {(name, json.loads(options)['EffectiveFramework'])
+                        for name, options in database.execute('SELECT name,options FROM project_variants')}
+            self.assertEqual(variants, pairs)
+            generated = database.execute("SELECT count(*) FROM documents WHERE origin='generated' AND path LIKE '%Generated.cs'").fetchone()[0]
+            self.assertEqual(generated, 2, 'one generated document per multitarget variant')
+            self.assertEqual(database.execute("SELECT count(*) FROM basic_blocks WHERE file_path LIKE '%\\\\obj\\\\%'").fetchone()[0], 0)
+
     def test_application_pipeline_and_copy(self):
         policy = self.folder / 'application.json'
         policy.write_text(json.dumps(dict(version=1, name='pipeline-application', rules=[

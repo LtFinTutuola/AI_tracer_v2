@@ -75,9 +75,7 @@ internal class Program
     private static async Task<Extracted> Extract(AnalyzerOptions options,string staging,MarkdownLogger logger,Dictionary<string,double> timings,CancellationToken token)
     {
         Progress("register_msbuild");MSBuildLocator.RegisterDefaults();
-        using var workspace=MSBuildWorkspace.Create(new Dictionary<string,string> {
-            ["TargetFramework"]=options.Framework,["Configuration"]=options.Configuration,["Platform"]=options.Platform,
-            ["DesignTimeBuild"]="true",["BuildProjectReferences"]="false",["SkipCompilerExecution"]="true",["AITracerAnalysis"]="true"});
+        using var workspace=MSBuildWorkspace.Create(options.WorkspaceProperties());
         workspace.LoadMetadataForReferencedProjects=false;
         var errors=new List<string>();workspace.WorkspaceFailed+=(_,e)=>errors.Add(e.Diagnostic.Message);
         var inputs=new InputRegistry();inputs.Track(options.Solution);
@@ -87,18 +85,27 @@ internal class Program
         timings["load_ms"]=clock.Elapsed.TotalMilliseconds;
         var loaded=solution.Projects.ToArray();var projects=loaded.Where(options.Includes).ToArray();
         if(projects.Length==0)throw new ArgumentException("Project filters selected no C# projects");
-        Progress("project_scope",details:new {loaded=loaded.Select(p=>p.FilePath).ToArray(),included=projects.Select(p=>p.FilePath).ToArray(),excluded=loaded.Except(projects).Select(p=>p.FilePath).ToArray()});
+        var projectFrameworks=projects.Select(p=>new {p.Name,p.FilePath,Framework=ProjectFramework.Effective(p,options.Framework)}).ToArray();
+        if(options.Framework.Equals("auto",StringComparison.OrdinalIgnoreCase)) {
+            var unknown=projectFrameworks.Where(p=>p.Framework=="<not-reported>").Select(p=>p.FilePath??p.Name).ToArray();
+            if(unknown.Length>0)throw new InvalidOperationException("MSBuild did not report a target framework for: "+string.Join(", ",unknown)+
+                ". Restore the projects or use an explicit legacy framework override.");
+        }
+        Progress("project_scope",details:new {loaded=loaded.Select(p=>p.FilePath).ToArray(),included=projects.Select(p=>p.FilePath).ToArray(),
+            frameworks=projectFrameworks,excluded=loaded.Except(projects).Select(p=>p.FilePath).ToArray()});
         using var catalog=new ContextCatalog(staging,options.Framework,options.Configuration,inputs);
         catalog.Batch(()=> {foreach(var error in errors)catalog.Diagnostic("workspace","LOAD_DIAGNOSTIC",error);
             catalog.Meta("platform",options.Platform);catalog.Meta("suggested_roots",JsonSerializer.Serialize(options.Roots));
-            catalog.Meta("project_scope",JsonSerializer.Serialize(projects.Select(p=>p.FilePath)));});
+            catalog.Meta("project_scope",JsonSerializer.Serialize(projects.Select(p=>p.FilePath)));
+            catalog.Meta("project_frameworks",JsonSerializer.Serialize(projectFrameworks));});
         clock.Restart();long writesBefore=catalog.WriteTicks;
         foreach(var project in projects) {
             token.ThrowIfCancellationRequested();Progress("analyze_project",project.Name);
             long variant=catalog.AddProject(project);var projectTime=Stopwatch.StartNew();
             foreach(var document in project.Documents) {
-                Progress("analyze_document",project.Name,document.FilePath??document.Name);
-                await catalog.AnalyzeDocument(document,variant,token:token);
+                bool generated=ProjectFramework.IsGenerated(project,document);
+                Progress(generated?"analyze_generated_document":"analyze_document",project.Name,document.FilePath??document.Name);
+                await catalog.AnalyzeDocument(document,variant,generated,token);
                 if(catalog.LastNewProbes.Count>0)logger.LogBlocks(project.Name,document.Name,catalog.LastNewProbes.ToList());
                 if(catalog.LastNewCount>0||catalog.LastReusedCount>0||catalog.LastDiscardedConflictCount>0)
                     Progress("shared_projection_reconciled",project.Name,document.FilePath??document.Name,
@@ -139,6 +146,16 @@ public sealed class AnalyzerOptions
     public TraceSelectionOptions Selection {get;private set;}=new();
     private readonly HashSet<string> include=new(StringComparer.OrdinalIgnoreCase),exclude=new(StringComparer.OrdinalIgnoreCase);
     public bool Includes(Project p)=>p.Language==LanguageNames.CSharp && (include.Count==0 || include.Contains(Path.GetFullPath(p.FilePath??p.Name))) && !exclude.Contains(Path.GetFullPath(p.FilePath??p.Name));
+    public Dictionary<string,string> WorkspaceProperties() {
+        var properties=new Dictionary<string,string> {
+            ["Configuration"]=Configuration,["Platform"]=Platform,["DesignTimeBuild"]="true",
+            ["BuildProjectReferences"]="false",["SkipCompilerExecution"]="true",["AITracerAnalysis"]="true"};
+        // A global TargetFramework overrides every project in a mixed solution. In
+        // auto mode MSBuild evaluates each project (and each multitarget variant)
+        // using its own TargetFramework instead.
+        if(!Framework.Equals("auto",StringComparison.OrdinalIgnoreCase))properties["TargetFramework"]=Framework;
+        return properties;
+    }
     public static AnalyzerOptions Parse(string[] args) {
         if(args.Length<3)throw new ArgumentException("Usage: RoslynAnalyzer <solution> <framework> <output> [configuration] [- [roots [platform]]] [--platform value] [--include-project path] [--exclude-project path] [--root symbol]");
         var o=new AnalyzerOptions {Solution=Path.GetFullPath(args[0]),Framework=args[1],Output=Path.GetFullPath(args[2])};

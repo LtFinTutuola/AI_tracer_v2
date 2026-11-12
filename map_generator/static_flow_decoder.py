@@ -33,6 +33,7 @@ class StaticFlowDecoder:
         self.memory_limit = max_memory_mb * 1024 * 1024
         self.events_read = self.segments = 0
         self.cache = OrderedDict()
+        self.local_streams = OrderedDict()
 
     def event(self, probe, line, stamp):
         if probe not in self.cache:
@@ -53,16 +54,73 @@ class StaticFlowDecoder:
                 'selection_reason': decision[0]['reason'] if decision else 'unknown_probe',
                 'enabled': bool(decision and decision[0]['enabled'])}
 
-    def starts(self, probe):
+    def starts(self, probe, local=False):
         rows = self.reader.rows('''SELECT l.method_id,l.word_json,m.status,m.evidence FROM static_flow_languages l
-            JOIN static_flow_methods m ON m.method_id=l.method_id WHERE l.first_probe=? ORDER BY l.method_id,l.word_json LIMIT ?''',
-            (probe, self.max_states + 1))
+            JOIN static_flow_methods m ON m.method_id=l.method_id WHERE l.first_probe=?
+            AND (m.status LIKE 'qualified_intra_method%')=? ORDER BY l.method_id,l.word_json LIMIT ?''',
+            (probe, int(local), self.max_states + 1))
         if len(rows) > self.max_states:
             return [], True
         # Bound materialized language text as well as the number of alternatives.
         if sum(len(r['word_json']) * 8 + 512 for r in rows) > self.memory_limit // 2:
             return [], True
         return [(r['method_id'], tuple(json.loads(r['word_json'])), 1, r['status']) for r in rows], False
+
+    def local_result(self, key, lines, candidates, reason=None):
+        return {'kind': 'static_local_path', 'trace_id': key[0], 'thread_id': key[1],
+                'method_id': key[2], 'marker_lines': lines, 'first_line': lines[0], 'last_line': lines[-1],
+                'status': 'incomplete' if reason else 'compatible', 'reason': reason,
+                'matching_words': [list(w) for _, w, p, _ in candidates if p == len(w)][:self.max_candidates],
+                'scope': 'own_method_projection', 'activation_identity': 'not_proven',
+                'call_relations': 'not_inferred', 'binding_status': self.binding_status}
+
+    def local_event(self, key, event):
+        # Project by source ownership offline, never pair publishers with callbacks.
+        # A repeated entry resets the projection: recursion/reentrancy is not flattened.
+        if not event['enabled'] or event['alternatives_truncated']:
+            yield from self.flush_local('unknown_or_ambiguous_probe')
+            return
+        starts, over = self.starts(event['probe_id'], local=True)
+        if over:
+            yield from self.flush_local('decoder_budget')
+            return
+        owners = {a['method_id'] for a in event['alternatives']}
+        if len(owners) != 1:
+            yield from self.flush_local('ambiguous_source_ownership')
+            return
+        method = next(iter(owners))
+        stream_key = (*key, method)
+        lines, candidates = self.local_streams.pop(stream_key, ([], []))
+        new = [s for s in starts if s[0] == method]
+        if new:
+            if lines:
+                yield self.local_result(stream_key, lines, candidates, 'repeated_entry_or_truncated_activation')
+            lines, candidates = [event['line']], new
+        elif lines:
+            candidates = [(m, w, p + 1, s) for m, w, p, s in candidates if p < len(w) and w[p] == event['probe_id']]
+            lines.append(event['line'])
+            if not candidates:
+                yield self.local_result(stream_key, lines, [], 'local_word_mismatch')
+                return
+        else:
+            return
+        complete = [s for s in candidates if s[2] == len(s[1])]
+        if complete:
+            yield self.local_result(stream_key, lines[:], complete)
+        pending = [s for s in candidates if s[2] < len(s[1])]
+        if pending:
+            self.local_streams[stream_key] = lines, pending
+        while self.local_streams and (len(self.local_streams) > 1024 or
+                sum(len(ls)*32 + sum(len(w)*16+512 for _, w, _, _ in cs)
+                    for ls, cs in self.local_streams.values()) > self.memory_limit // 2 or
+                any(len(ls) > self.max_states for ls, _ in self.local_streams.values())):
+            k, (ls, cs) = self.local_streams.popitem(last=False)
+            yield self.local_result(k, ls, cs, 'decoder_budget')
+
+    def flush_local(self, reason):
+        for key, (lines, candidates) in self.local_streams.items():
+            yield self.local_result(key, lines, candidates, reason)
+        self.local_streams.clear()
 
     def result(self, key, events, candidates, reason=None):
         self.segments += 1
@@ -93,6 +151,7 @@ class StaticFlowDecoder:
                         raise ValueError()
                     probe = int(token);int(thread)
                 except ValueError:
+                    yield from self.flush_local('malformed_record_gap')
                     for key, (events, candidates) in streams.items():
                         yield self.result(key, events, candidates, 'malformed_record_gap')
                     streams.clear()
@@ -102,6 +161,7 @@ class StaticFlowDecoder:
                 self.events_read += 1
                 key = trace, thread
                 event = self.event(probe, line, stamp)
+                yield from self.local_event(key, event)
                 events, candidates = streams.pop(key, ([], []))
                 advanced = [(m, w, position + 1, status) for m, w, position, status in candidates
                             if position < len(w) and w[position] == probe]
@@ -124,6 +184,7 @@ class StaticFlowDecoder:
                     yield self.result(oldest, buffer, paths, 'decoder_budget')
         for key, (events, candidates) in streams.items():
             yield self.result(key, events, candidates)
+        yield from self.flush_local('end_of_log')
         yield {'kind': 'summary', 'events_read': self.events_read, 'segments': self.segments,
                'binding_status': self.binding_status, 'profile_id': self.reader.manifest['selection_profile_id'],
                'ordering': 'file order within correlation/thread; activation identities unavailable'}
