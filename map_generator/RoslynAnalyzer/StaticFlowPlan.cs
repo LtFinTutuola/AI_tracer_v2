@@ -12,7 +12,7 @@ public sealed record StaticObligation(long Method,string Kind,string Status,stri
 /// <summary>Build-time only. No part of this plan is interpreted by the runtime.</summary>
 public sealed class StaticFlowPlan
 {
-    public const string Algorithm="static_flow_v1";
+    public const string Algorithm="static_flow_v2";
     public const string Contract="static_probes_v1";
     public List<StaticRegion> Regions {get;}=new();
     public List<StaticMethodSummary> Methods {get;}=new();
@@ -27,7 +27,8 @@ public sealed class StaticFlowPlan
         emission_statuses=Methods.GroupBy(m=>m.Emissions).ToDictionary(g=>g.Key,g=>g.Count()),
         decisions=Decisions.Count,enabled=Decisions.Values.Count(d=>d.Enabled),
         losses=Regions.Select(r=>r.Loss).Distinct(),
-        guarantee="ordered marker languages in the declared finite normal-flow abstraction; no runtime activation IDs or loss detection",
+        local_fallback="whole-method projection; no callee substitution or event/call boundary probes",
+        guarantee="ordered normal-flow marker languages; qualified_intra_method statuses cover own markers only; activation identity and publisher/callback causality are not proven",
         minimum="deterministic greedy reduction; global minimum not claimed"};
 
     // The grammar permits constant Log statements, braces and an implicit else arm.

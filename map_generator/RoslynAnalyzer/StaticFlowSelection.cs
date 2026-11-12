@@ -24,6 +24,11 @@ public static class StaticFlowSelection
         void Rows(string sql,Action<SqliteDataReader> read,params object[] values){using var c=db.CreateCommand();c.CommandText=sql;for(int i=0;i<values.Length;i++)c.Parameters.AddWithValue("@p"+i,values[i]);using var r=c.ExecuteReader();while(r.Read()){resources.Check();read(r);}}
         string? contract=null;Rows("SELECT value FROM analysis_manifest WHERE key='injection_contract'",r=>contract=r.GetString(0));
         if(contract!=null&&contract!=StaticFlowPlan.Contract)throw new InvalidOperationException("Regenerate the catalog in static mode; application wrappers cannot be requalified as blind probes");
+        Rows("SELECT value FROM analysis_manifest WHERE key='static_flow_summary'",r=>{
+            using var previous=JsonDocument.Parse(r.GetString(0));
+            if(previous.RootElement.GetProperty("algorithm").GetString()!=StaticFlowPlan.Algorithm)
+                throw new InvalidOperationException("Regenerate the catalog: previous static call/event boundary placements cannot be reused by static_flow_v2");
+        });
         var policy=options.ObservationPolicy.Length==0?null:ApplicationPolicy.Load(options.ObservationPolicy);
         var placement=new ApplicationPlan {PolicyFingerprint=policy?.Fingerprint??ContextCatalog.Id("static-default"),PolicyJson=policy==null?"{}":File.ReadAllText(options.ObservationPolicy)};
         if(policy!=null)placement.Inputs.Track(options.ObservationPolicy,File.ReadAllText(options.ObservationPolicy));
@@ -47,6 +52,11 @@ public static class StaticFlowSelection
         var planner=new ApplicationProbePlanner(db,placement,resources,methods);
         var technical=methods.Values.Where(m=>roles.GetValueOrDefault(m.Symbol)=="technical").Select(m=>m.Id).ToHashSet();
         var hidden=options.RepeatPolicy=="detail"?new HashSet<long>():new HashSet<long>(model.Repeated);
+        // Contract implementations, overrides and registered callback targets may be
+        // entered independently. Keep their entry observable even when a caller repeats.
+        var independent=methods.Values.Where(m=>m.EntryKind is "contract" or "override").Select(m=>m.Id).ToHashSet();
+        Rows("SELECT DISTINCT f.method_id FROM application_registrations r JOIN application_method_facts f ON f.symbol_key=r.target_key",r=>independent.Add(r.GetInt64(0)));
+        hidden.ExceptWith(independent.Where(m=>!model.Recursive.Contains(m)));
         hidden.UnionWith(technical);
         foreach(var m in methods.Values) {
             resources.Check();
@@ -54,14 +64,8 @@ public static class StaticFlowSelection
             if(!m.Supported||!m.PhysicalSource||hidden.Contains(m.Id))continue;
             planner.BlindEntry(m,constructors.Contains(m.Symbol));
             if(options.RepeatPolicy=="boundaries"&&model.MethodNodes[m.Id].Any(model.CyclicNodes.Contains))planner.BlindLoopBoundaries(m);
-            // Explicit source call boundaries witness attempts and statement completion.
-            // They use existing control flow and do not wrap expressions or exceptions.
-            Rows("SELECT id,kind,anchor,edit_offset,span_start,span_end,repeated,payload,symbol_key FROM application_facts WHERE method_id=@p0 AND kind='call' ORDER BY anchor",r=>{
-                using var payload=JsonDocument.Parse(r.GetString(7));var p=payload.RootElement;
-                if(r.GetInt32(3)<0||p.GetProperty("style").GetString()=="unsupported")return;
-                if(options.RepeatPolicy!="detail"&&r.GetInt32(6)!=0)return;
-                planner.Fact(m,"call",r.GetInt32(2),r.GetInt32(3),r.GetInt32(4),r.GetInt32(5),p,"call_attempt",r.GetInt32(6)!=0,r.GetInt64(0));
-            },m.Id);
+            // Calls, dispatch and event publication do not get synthetic boundary
+            // observations. Concrete executions are witnessed by callee/body probes.
             if(policy!=null)Rows("SELECT id,kind,anchor,edit_offset,span_start,span_end,repeated,payload,symbol_key FROM application_facts WHERE method_id=@p0 AND kind IN ('arm','case','assignment') ORDER BY anchor",r=>{
                 using var payload=JsonDocument.Parse(r.GetString(7));var p=payload.RootElement;string kind=r.GetString(1);
                 bool selected=kind=="assignment"?roles.GetValueOrDefault(r.GetString(8))=="state_assignment":
@@ -104,26 +108,28 @@ public static class StaticFlowSelection
             AND NOT EXISTS(SELECT 1 FROM legacy_probe_variants v WHERE v.legacy_id=b.id AND v.variant_id=d.variant_id))
           """,r=>model.Opaque.Add(r.GetInt64(0)));
         progress?.Invoke("static_interprocedural_summaries",new {regions=plan.Regions.Count,repeated_methods=model.Repeated.Count});
-        var languages=new Dictionary<long,List<TraceWord>>();var qualified=new HashSet<long>();
+        var languages=new Dictionary<long,List<TraceWord>>();var qualified=new HashSet<long>();var interprocedural=new HashSet<long>();
         // SCC order is caller-first. Reverse order substitutes already-built callee languages.
         foreach(var component in model.MethodComponents.AsEnumerable().Reverse())foreach(long method in component) {
             resources.Check();
             bool abstracted=hidden.Contains(method);
             bool loop=model.MethodNodes[method].Any(model.CyclicNodes.Contains);
+            bool local=model.OpenCalls.Contains(method)||model.Calls[method].Any(c=>!interprocedural.Contains(c));
             List<TraceWord>? words;
-            if(abstracted&&model.Calls[method].All(hidden.Contains)&&!model.Opaque.Contains(method))words=new(){new(Array.Empty<long>())};
-            else if(model.Recursive.Contains(method)||model.Opaque.Contains(method)||model.Calls[method].Any(c=>!languages.ContainsKey(c)||!qualified.Contains(c)&&!hidden.Contains(c)))words=null;
-            else words=Enumerate(method,model,languages,options,resources);
-            if(words!=null){languages[method]=words;if(!abstracted&&!model.Opaque.Contains(method))qualified.Add(method);}
-            string status=abstracted?(words==null?"policy_abstracted_opaque":"policy_abstracted"):words==null?"unresolved_analysis":model.Opaque.Contains(method)?"baseline_ambiguous":loop||model.Calls[method].Any(hidden.Contains)?"qualified_abstraction":"qualified_normal_flow";
-            string emission=words==null?"unknown":abstracted&&words.All(w=>w.Events.Length==0)?"silent":options.RepeatPolicy=="detail"&&(loop||model.Repeated.Contains(method))?"potentially_unbounded":"bounded_in_declared_model";
+            if(abstracted&&model.Calls[method].All(hidden.Contains)&&!model.Opaque.Contains(method)&&!model.OpenCalls.Contains(method))words=new(){new(Array.Empty<long>())};
+            else if(model.Recursive.Contains(method)||model.Opaque.Contains(method))words=null;
+            else words=Enumerate(method,model,languages,options,resources,local);
+            if(words!=null){languages[method]=words;if(!abstracted&&!model.Opaque.Contains(method)){qualified.Add(method);if(!local)interprocedural.Add(method);}}
+            bool abstraction=loop||model.Calls[method].Any(hidden.Contains);
+            string status=model.MethodNodes[method].Count==0?"no_body":abstracted?(words==null?"policy_abstracted_opaque":"policy_abstracted"):words==null?"unresolved_analysis":model.Opaque.Contains(method)?"baseline_ambiguous":local?(abstraction?"qualified_intra_method_abstraction":"qualified_intra_method"):abstraction?"qualified_abstraction":"qualified_normal_flow";
+            string emission=words==null?"unknown":abstracted&&words.All(w=>w.Events.Length==0)?"silent":local?"local_only_external_emissions_unknown":options.RepeatPolicy=="detail"&&(loop||model.Repeated.Contains(method))?"potentially_unbounded":"bounded_in_declared_model";
             plan.Methods.Add(new(method,status,model.Repeated.Contains(method),model.Opaque.Contains(method),words?.Count??0,emission,
-                abstracted?"Local execution detail and termination are not observed; non-suppressed callee observations remain in the language when known":words==null?"Open call, unsupported transfer, recursive detail or state budget prevents proof":"Finite normal-flow language with balanced call-site substitution; silent SCC internals abstracted; feasibility is conservative"));
+                abstracted?"Local execution detail and termination are not observed; non-suppressed callees may emit independently":words==null?"Local CFG/semantic/placement failure, unsupported suspension, recursive detail or state budget prevents proof":local?"Own-method normal-flow projection only; every callee excluded because full interprocedural composition is unavailable; callback/implementation executions remain independent":"Finite normal-flow language with balanced call-site substitution; silent SCC internals abstracted; feasibility is conservative"));
             plan.Obligations.Add(new(method,"ordered_normal_paths",status,"Preserve distinct full candidate-marker words within the declared abstraction; identical baseline words are not proven distinct control paths"));
         }
         // Protect unresolved method owners: their behavior cannot justify a deletion.
         var protectedIds=model.Owners.Where(p=>p.Value.Any(m=>!qualified.Contains(m)&&!hidden.Contains(m))).Select(p=>p.Key).ToHashSet();
-        foreach(var binding in placement.Bindings)if(placement.Observations[binding.Observation].Kind is "call_attempt" or "call_statement_completed" or "decision" or "state_assignment_completed")protectedIds.Add(binding.Probe);
+        foreach(var binding in placement.Bindings)if(placement.Observations[binding.Observation].Kind is "decision" or "state_assignment_completed")protectedIds.Add(binding.Probe);
         foreach(long id in all)if(!model.Links.ContainsKey(id))protectedIds.Add(id);
         var corpus=new Dictionary<TraceWord,long>();
         foreach(long method in qualified)foreach(var word in languages[method]){resources.Check();corpus[word]=1;}
@@ -158,7 +164,7 @@ public static class StaticFlowSelection
         progress?.Invoke("static_verified",plan.Summary);return result;
     }
 
-    private static List<TraceWord>? Enumerate(long method,StaticFlowModel model,Dictionary<long,List<TraceWord>> languages,TraceSelectionOptions options,SelectionResources resources)
+    private static List<TraceWord>? Enumerate(long method,StaticFlowModel model,Dictionary<long,List<TraceWord>> languages,TraceSelectionOptions options,SelectionResources resources,bool local=false)
     {
         var nodes=model.MethodNodes[method];long entry=nodes.FirstOrDefault(n=>model.Nodes[n].Kind=="Entry");if(entry==0)return null;
         var groups=nodes.GroupBy(n=>model.Components[n]).ToDictionary(g=>g.Key,g=>g.ToArray());
@@ -171,6 +177,7 @@ public static class StaticFlowSelection
                 if(cyclic&&options.RepeatPolicy=="detail")return null;
                 var words=new List<long[]>{state.Word};
                 if(!cyclic)foreach(var ev in model.Nodes[members[0]].Events) {
+                    if(local&&ev.Callee!=0)continue;
                     var additions=ev.Callee==0?new List<TraceWord>{new(new[]{ev.Probe})}:languages[ev.Callee];
                     if((long)words.Count*additions.Count>options.MaxFlowStates)return null;
                     var expanded=new List<long[]>();foreach(var prefix in words)foreach(var suffix in additions){resources.Check();long size=128L+(prefix.Length+suffix.Events.Length)*8L;resources.Reserve(size);bytes+=size;expanded.Add(prefix.Concat(suffix.Events).ToArray());}

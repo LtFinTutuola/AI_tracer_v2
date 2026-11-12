@@ -35,7 +35,19 @@ internal static class StaticFlowTests
             public void Twice() { Branch(true); Branch(false); }
             public void TechnicalCaller() { Branch(true); }
             public void Outside() { TechnicalCaller(); }
+            public int External(bool x) { int n=System.Math.Abs(State); if(x) { State=n+1; } else { State=n-1; } return State; }
+            public void UsesExternal(bool x) { External(x); if(x) { State++; } else { State--; } }
+            public void Dispatch(IWorker worker,bool x) { worker.Work(x); if(x) { State++; } else { State--; } }
+            public event System.Action<bool> Changed;
+            public void Subscribe() { Changed += Callback; }
+            public void Publish(bool x) { Changed(x); if(x) { State++; } else { State--; } }
+            public void Callback(bool x) { if(x) { State=10; } else { State=20; } }
+            public void InvokeDelegate(System.Action<bool> handler,bool x) { handler(x); if(x) { State++; } else { State--; } }
+            public void Exceptional(bool x) { try { External(x); } finally { State++; } }
           }
+          public interface IWorker { void Work(bool x); }
+          public class WorkerA : IWorker { public void Work(bool x) { if(x) { Value=1; } else { Value=2; } } public int Value; }
+          public class WorkerB : IWorker { public void Work(bool x) { if(x) { Value=3; } else { Value=4; } } public int Value; }
           """;
         var deep=new StringBuilder(source+" public class Deep {");
         for(int i=0;i<40;i++)deep.Append("public void M"+i+"(){"+(i==39?"":"M"+(i+1)+"();")+"}");
@@ -54,6 +66,15 @@ internal static class StaticFlowTests
         assert(plan.Methods.Single(m=>m.Method==Method(".Helper(")).Repeated,"Milestone 3: helper repetition propagates through loop call sites");
         assert(plan.Methods.Single(m=>m.Method==Method(".M0(")).Status=="qualified_normal_flow","Forty-level chain qualifies even with MaxCallDepth=0");
         long branch=Method(".Branch(");assert(plan.Witnesses[branch].Length==2,"Branch has two normal-path signatures");
+        foreach(string name in new[]{".External(",".UsesExternal(",".Dispatch(",".Publish(",".InvokeDelegate("}) {
+            long id=Method(name);
+            assert(plan.Methods.Single(m=>m.Method==id).Status=="qualified_intra_method","Open/transitively incomplete chain is reduced within its own method: "+name);
+            assert(plan.Witnesses[id].Length==2,"Both local branches remain distinguishable: "+name);
+        }
+        foreach(string name in new[]{".Callback(","WorkerA.Work(","WorkerB.Work("})
+            assert(plan.Methods.Single(m=>m.Method==Method(name)).Status=="qualified_normal_flow","Independently entered leaf remains a normal qualified flow: "+name);
+        assert(plan.Methods.Single(m=>m.Method==Method(".Exceptional(")).Status=="unresolved_analysis","Local fallback never hides incomplete finally semantics");
+        assert(result.Application!.Observations.Values.All(o=>o.Kind is not ("call_attempt" or "call_statement_completed")),"No event, dispatch or call-boundary probes are generated");
         assert(plan.Witnesses[branch].Select(w=>new TraceWord(w.Where(id=>!result.Disabled.Contains(id)))).Distinct().Count()==2,"Milestone 4: reduced signatures distinguish both alternatives");
         assert(plan.Decisions.Values.Any(d=>d.Reason=="suppressed_proven_redundant"),"Redundancy is proved against ordered languages");
         assert(plan.Decisions.Values.Any(d=>d.Reason=="suppressed_by_repeat_policy"),"Repetition loss is distinguished from proved redundancy");
@@ -63,7 +84,7 @@ internal static class StaticFlowTests
         File.WriteAllText(policyFile,"""{"version":1,"name":"technical-test","rules":[{"type":"StaticFixture","member":"TechnicalCaller","role":"technical"}]}""");
         var policyResult=TraceSelectionEngine.Select(path,options with {ObservationPolicy=policyFile});
         assert(policyResult.Static!.Methods.Single(m=>m.Method==Method(".TechnicalCaller(")).Emissions!="silent","Suppressing a technical caller does not hide instrumented callee observations");
-        assert(policyResult.Static.Witnesses[Method(".Outside(")].Length==2,"Composed caller retains the technical callee's observed descendants");
+        assert(policyResult.Static!.Methods.Single(m=>m.Method==Method(".Outside(")).Status=="qualified_intra_method","Caller of a silent technical method falls back to its own-method projection");
         var detail=TraceSelectionEngine.Select(path,options with {RepeatPolicy="detail"});
         assert(detail.Static!.Decisions.Values.All(d=>d.Reason!="suppressed_by_repeat_policy"),"Detail policy retains repeated candidates");
         assert(detail.Static.Methods.Any(m=>m.Status=="unresolved_analysis"),"Recursive detail is not mislabeled as fully qualified");
